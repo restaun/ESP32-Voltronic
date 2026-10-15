@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Configurar Wi-Fi · ESP32 Axpert</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#081020;color:#f0f5ff}
+body{max-width:680px;margin:32px auto;padding:0 20px}section{background:#142238;border-radius:18px;padding:24px;margin:20px 0}
+label{display:block;margin:16px 0 6px}input,select,button{box-sizing:border-box;font:inherit;padding:12px;border-radius:8px;border:1px solid #456077;background:#1e3648;color:inherit}
+input:not([type=radio]),select{width:100%}button{cursor:pointer;margin:12px 6px 0 0}button:disabled{opacity:.5;cursor:wait}a{color:#6cdaef}
+#result{white-space:pre-wrap}#result[data-error=true]{color:#ffad99}.danger{border-color:#de7868}small{display:block;color:#b4c9d9;margin-top:8px}
+</style>
+<script defer src="/wifi.js"></script>
+</head>
+<body>
+<h1>Configurar Wi-Fi</h1>
+<p id="network-status" role="status">Consultando modo de red...</p>
+<p>Conecta el ESP32 a una red de 2,4 GHz o crea una red propia para acceder al panel sin router.</p>
+<section>
+<form id="wifi-form">
+<label for="mode">Modo de funcionamiento</label>
+<select id="mode"><option value="sta">Conectarse a una Wi-Fi</option><option value="ap">Crear una Wi-Fi</option></select>
+<div id="scan-area"><button type="button" id="scan">Buscar redes</button><label for="networks">Redes encontradas</label><select id="networks"><option value="">Elige una red o escribe su nombre</option></select></div>
+<label for="ssid">Nombre de la red (SSID)</label><input id="ssid" maxlength="32" required autocomplete="off">
+<label for="password">Contraseña de la red</label><input id="password" type="password" maxlength="64" autocomplete="new-password">
+<small id="password-help">Déjala vacía solo si la red es abierta.</small>
+<label for="web-password">Nueva contraseña del panel y OTA (opcional)</label><input id="web-password" type="password" minlength="8" maxlength="48" autocomplete="new-password">
+<small>Vacía conserva la contraseña actual. Usuario del panel: admin. Crear una red requiere una clave de 8 a 63 caracteres.</small>
+<button id="save" type="submit">Guardar y reiniciar</button>
+</form>
+</section>
+<p id="result" role="status"></p>
+<p><a href="/panel">Abrir panel energético y OTA</a></p>
+<section>
+<h2>Restablecer configuración</h2>
+<p>Olvida la red, su contraseña, el modo de conexión y la contraseña web. Tras reiniciar, configura de nuevo desde la pantalla táctil. No cambia ajustes del Axpert.</p>
+<button id="reset" type="button" class="danger">Restablecer Wi-Fi y acceso web</button>
+</section>
+<p>En modo de red propia abre <strong>http://192.168.4.1/</strong>. Es normal que el teléfono indique «sin Internet». No se abre un portal automáticamente. HTTP no cifra el tráfico: usa solo redes de confianza.</p>
+</body>
+</html>

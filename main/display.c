@@ -524,16 +524,16 @@ void display_end_update(void)
 
 static void draw_wifi_setup(const char *ssid, const char *wifi_password,
                             const char *web_password, unsigned int selected_field,
-                            bool lower_case, bool symbols)
+                            bool lower_case, bool symbols, bool create_network)
 {
     const uint16_t background = rgb565(8, 16, 32);
     const uint16_t foreground = rgb565(240, 245, 255);
     const uint16_t button = rgb565(30, 54, 72);
     const uint16_t selected = rgb565(0, 76, 88);
     fill_background(background);
-    draw_text_at("CONFIGURA WIFI", 28, 20, 5, foreground);
+    draw_text_at(create_network ? "CREAR WIFI" : "CONECTAR WIFI", 28, 20, 5, foreground);
     draw_filled_rect(770, 10, 230, 50, button);
-    draw_text_at("BUSCAR RED", 795, 25, 3, foreground);
+    draw_text_at("VOLVER", 795, 25, 3, foreground);
 
     const char *values[] = {ssid, wifi_password, web_password};
     const char *labels[] = {"RED WIFI", "CLAVE WIFI", "CLAVE OTA"};
@@ -714,17 +714,48 @@ static char keyboard_key_at(uint16_t x, uint16_t y, bool lower_case, bool symbol
 
 static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
                             char *wifi_password, size_t wifi_password_capacity,
-                            char *web_password, size_t web_password_capacity)
+                            char *web_password, size_t web_password_capacity,
+                            bool *create_network)
 {
     if (touch == NULL || ssid == NULL || wifi_password == NULL || web_password == NULL ||
-        ssid_capacity < 2 || wifi_password_capacity < 2 || web_password_capacity < 9) {
+        create_network == NULL || ssid_capacity < 2 ||
+        wifi_password_capacity < 2 || web_password_capacity < 9) {
         ESP_LOGE(TAG, "Touch setup unavailable or Wi-Fi setup buffer is invalid");
         return false;
     }
 
     wifi_setup_active = true;
+choose_mode:
+    fill_background(rgb565(8, 16, 32));
+    draw_text("CONFIGURAR WIFI", 80, 6, rgb565(240, 245, 255));
+    draw_filled_rect(100, 200, 824, 100, rgb565(30, 54, 72));
+    draw_text("CONECTAR A UNA WIFI", 235, 4, rgb565(240, 245, 255));
+    draw_filled_rect(100, 350, 824, 100, rgb565(30, 54, 72));
+    draw_text("CREAR UNA WIFI", 385, 4, rgb565(240, 245, 255));
+    flush_framebuffer();
+    bool choosing = true;
+    bool mode_touch_down = true;
+    while (choosing) {
+        uint16_t x = 0, y = 0;
+        bool pressed = false;
+        if (read_touch_press(&mode_touch_down, &x, &y, &pressed) != ESP_OK) {
+            wifi_setup_active = false;
+            return false;
+        }
+        if (pressed && x >= 100 && x < 924 &&
+            ((y >= 200 && y < 300) || (y >= 350 && y < 450))) {
+            *create_network = y >= 350;
+            choosing = false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(35));
+    }
     bool network_selected = false;
-    if (!select_wifi_network(ssid, ssid_capacity, &network_selected)) {
+    ssid[0] = '\0';
+    wifi_password[0] = '\0';
+    if (*create_network) {
+        strlcpy(ssid, "Esp32AxpertVMII", ssid_capacity);
+        network_selected = true;
+    } else if (!select_wifi_network(ssid, ssid_capacity, &network_selected)) {
         wifi_setup_active = false;
         return false;
     }
@@ -734,7 +765,7 @@ static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
     bool touch_was_down = true;
     char *target[] = {ssid, wifi_password, web_password};
     const size_t capacities[] = {ssid_capacity, wifi_password_capacity, web_password_capacity};
-    draw_wifi_setup(ssid, wifi_password, web_password, selected_field, lower_case, symbols);
+    draw_wifi_setup(ssid, wifi_password, web_password, selected_field, lower_case, symbols, *create_network);
 
     while (true) {
         uint16_t x = 0;
@@ -752,15 +783,7 @@ static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
         bool redraw = true;
         const char key = keyboard_key_at(x, y, lower_case, symbols);
         if (x >= 770 && x < 1000 && y >= 10 && y < 60) {
-            if (!select_wifi_network(ssid, ssid_capacity, &network_selected)) {
-                wifi_setup_active = false;
-                return false;
-            }
-            if (network_selected) {
-                selected_field = 1;
-                wifi_password[0] = '\0';
-            }
-            touch_was_down = true;
+            goto choose_mode;
         } else if (x >= 22 && x < 1002 && y >= 75 && y < 249 && (y - 75) % 58 < 48) {
             selected_field = (unsigned int)((y - 75) / 58);
         } else if (key != '\0') {
@@ -790,14 +813,15 @@ static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
                     value[length - 1] = '\0';
                 }
             } else if (x >= 815 && x < 970) {
-                if (ssid[0] != '\0' && strlen(web_password) >= 8) {
+                if (ssid[0] != '\0' && strlen(web_password) >= 8 &&
+                    network_valid_wifi_password(wifi_password, *create_network)) {
                     wifi_setup_active = false;
                     return true;
                 }
-                ESP_LOGW(TAG, "Wi-Fi setup requires a network and an OTA password of at least 8 characters");
+                ESP_LOGW(TAG, "Wi-Fi setup requires SSID, OTA password >=8 and AP password 8..63");
                 memcpy(framebuffer, lcd_framebuffers[drawing_buffer_index ^ 1u],
                        LCD_H_RES * LCD_V_RES * sizeof(*framebuffer));
-                draw_text_at("RED Y CLAVE OTA MINIMO 8", 30, 580, 2, rgb565(255, 160, 120));
+                draw_text_at("CLAVE WEB MIN 8 / WIFI 8 A 63 O ABIERTA", 30, 580, 2, rgb565(255, 160, 120));
                 flush_framebuffer();
                 redraw = false;
             }
@@ -806,7 +830,7 @@ static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
         }
 
         if (redraw) {
-            draw_wifi_setup(ssid, wifi_password, web_password, selected_field, lower_case, symbols);
+            draw_wifi_setup(ssid, wifi_password, web_password, selected_field, lower_case, symbols, *create_network);
         }
         vTaskDelay(pdMS_TO_TICKS(35));
     }
@@ -814,12 +838,13 @@ static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
 
 bool display_configure_wifi(char *ssid, size_t ssid_capacity,
                             char *wifi_password, size_t wifi_password_capacity,
-                            char *web_password, size_t web_password_capacity)
+                            char *web_password, size_t web_password_capacity,
+                            bool *create_network)
 {
     xSemaphoreTake(render_mutex, portMAX_DELAY);
     const bool configured = configure_wifi_locked(ssid, ssid_capacity, wifi_password,
                                                   wifi_password_capacity, web_password,
-                                                  web_password_capacity);
+                                                  web_password_capacity, create_network);
     xSemaphoreGive(render_mutex);
     return configured;
 }

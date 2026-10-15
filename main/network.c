@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -30,6 +31,7 @@
 #define CONFIG_SSID_KEY "ssid"
 #define CONFIG_WIFI_PASS_KEY "wifi_pass"
 #define CONFIG_WEB_PASS_KEY "web_pass"
+#define CONFIG_AP_MODE_KEY "ap_mode"
 #define WIFI_SSID_MAX 32
 #define WIFI_PASS_MAX 64
 #define WEB_PASS_MAX 48
@@ -38,6 +40,8 @@
 static const char *TAG = "network";
 static EventGroupHandle_t wifi_event_group;
 static esp_netif_t *station_netif;
+static esp_netif_t *access_point_netif;
+static volatile bool access_point_active;
 static httpd_handle_t web_server;
 static char web_password[WEB_PASS_MAX + 1];
 static volatile bool axpert_hid_found;
@@ -52,6 +56,33 @@ extern const char panel_css_start[] asm("_binary_panel_css_start");
 extern const char panel_css_end[] asm("_binary_panel_css_end");
 extern const char panel_js_start[] asm("_binary_panel_js_start");
 extern const char panel_js_end[] asm("_binary_panel_js_end");
+extern const char wifi_html_start[] asm("_binary_wifi_html_start");
+extern const char wifi_html_end[] asm("_binary_wifi_html_end");
+extern const char wifi_js_start[] asm("_binary_wifi_js_start");
+extern const char wifi_js_end[] asm("_binary_wifi_js_end");
+
+static esp_err_t save_configuration(const char *ssid, const char *wifi_pass,
+                                    const char *ota_pass, bool create_network);
+
+bool network_valid_wifi_password(const char *password, bool create_network)
+{
+    const size_t length = strlen(password);
+    if (length >= 8 && length <= 63) {
+        return true;
+    }
+    if (!create_network && length == 0) {
+        return true;
+    }
+    if (!create_network && length == 64) {
+        for (size_t index = 0; index < length; ++index) {
+            if (!isxdigit((unsigned char)password[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
 
 static bool authorize_request(httpd_req_t *req)
 {
@@ -109,6 +140,14 @@ static esp_err_t index_handler(httpd_req_t *req)
         start = panel_js_start;
         end = panel_js_end;
         type = "application/javascript; charset=utf-8";
+    } else if (strcmp(req->uri, "/wifi.js") == 0) {
+        start = wifi_js_start;
+        end = wifi_js_end;
+        type = "application/javascript; charset=utf-8";
+    } else if (strcmp(req->uri, "/wifi") == 0 ||
+               (strcmp(req->uri, "/") == 0 && access_point_active)) {
+        start = wifi_html_start;
+        end = wifi_html_end;
     }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, type);
@@ -189,22 +228,156 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
 
     esp_netif_ip_info_t ip_info = {0};
-    const bool has_ip = esp_netif_get_ip_info(station_netif, &ip_info) == ESP_OK;
+    const bool has_ip = esp_netif_get_ip_info(access_point_active ?
+                                             access_point_netif : station_netif, &ip_info) == ESP_OK;
     const esp_app_desc_t *app = esp_app_get_description();
     char json[384];
     const int length = snprintf(json, sizeof(json),
                                 "{\"wifi\":\"%s\",\"hid\":%s,\"axpert\":%s,\"version\":\"%s\","
-                                "\"hostname\":\"esp32axpertvmii.local\"}",
+                                "\"hostname\":\"esp32axpertvmii.local\",\"network_mode\":\"%s\"}",
                                 has_ip ? ip4addr_ntoa((const ip4_addr_t *)&ip_info.ip) : "sin IP",
                                 axpert_hid_found ? "true" : "false",
                                 axpert_connected ? "true" : "false",
-                                app->version);
+                                app->version, access_point_active ? "ap" : "sta");
     if (length < 0 || (size_t)length >= sizeof(json)) {
         ESP_LOGE(TAG, "Could not format status response");
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json, length);
+}
+
+static esp_err_t send_json(httpd_req_t *req, cJSON *root)
+{
+    char *json = root == NULL ? NULL : cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "Could not allocate Wi-Fi JSON");
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memoria insuficiente");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const esp_err_t err = httpd_resp_sendstr(req, json);
+    cJSON_free(json);
+    return err;
+}
+
+static esp_err_t wifi_scan_handler(httpd_req_t *req)
+{
+    if (require_authorization(req) != ESP_OK) {
+        return ESP_OK;
+    }
+    network_wifi_ap_t networks[NETWORK_SCAN_CAPACITY];
+    size_t count = 0;
+    if (network_scan_wifi(networks, NETWORK_SCAN_CAPACITY, &count) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No se pudieron buscar redes");
+    }
+    cJSON *root = cJSON_CreateArray();
+    for (size_t index = 0; root != NULL && index < count; ++index) {
+        cJSON *entry = cJSON_CreateObject();
+        if (entry == NULL ||
+            cJSON_AddStringToObject(entry, "ssid", networks[index].ssid) == NULL ||
+            cJSON_AddNumberToObject(entry, "rssi", networks[index].rssi) == NULL ||
+            cJSON_AddBoolToObject(entry, "secured", networks[index].secured) == NULL ||
+            !cJSON_AddItemToArray(root, entry)) {
+            cJSON_Delete(entry);
+            cJSON_Delete(root);
+            root = NULL;
+            break;
+        }
+    }
+    return send_json(req, root);
+}
+
+static cJSON *read_wifi_request(httpd_req_t *req)
+{
+    char type[40];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK ||
+        strcmp(type, "application/json") != 0 || req->content_len <= 0 || req->content_len > 768) {
+        ESP_LOGW(TAG, "Rejected invalid Wi-Fi configuration request");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Se requiere JSON de hasta 768 bytes");
+        return NULL;
+    }
+    char buffer[769];
+    int offset = 0;
+    while (offset < req->content_len) {
+        const int received = httpd_req_recv(req, buffer + offset, req->content_len - offset);
+        if (received <= 0) {
+            ESP_LOGW(TAG, "Wi-Fi configuration request interrupted");
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Peticion interrumpida");
+            return NULL;
+        }
+        offset += received;
+    }
+    buffer[offset] = '\0';
+    cJSON *root = cJSON_ParseWithLengthOpts(buffer, (size_t)offset + 1, NULL, true);
+    if (!cJSON_IsObject(root)) {
+        ESP_LOGW(TAG, "Invalid Wi-Fi configuration JSON");
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON no valido");
+        return NULL;
+    }
+    return root;
+}
+
+static esp_err_t wifi_configuration_handler(httpd_req_t *req)
+{
+    if (require_authorization(req) != ESP_OK) {
+        return ESP_OK;
+    }
+    cJSON *root = read_wifi_request(req);
+    if (root == NULL) {
+        return ESP_OK;
+    }
+    esp_err_t err;
+    if (strcmp(req->uri, "/api/wifi/reset") == 0) {
+        const cJSON *confirm = cJSON_GetObjectItemCaseSensitive(root, "confirm");
+        if (!cJSON_IsString(confirm) || strcmp(confirm->valuestring, "RESET") != 0) {
+            cJSON_Delete(root);
+            ESP_LOGW(TAG, "Wi-Fi reset request missing explicit confirmation");
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Confirmacion requerida");
+        }
+        nvs_handle_t handle;
+        err = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &handle);
+        if (err == ESP_OK) {
+            err = nvs_erase_all(handle);
+            if (err == ESP_OK) {
+                err = nvs_commit(handle);
+            }
+            nvs_close(handle);
+        }
+    } else {
+        const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+        const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(root, "ssid");
+        const cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+        const cJSON *ota = cJSON_GetObjectItemCaseSensitive(root, "web_password");
+        const bool ap = cJSON_IsString(mode) && strcmp(mode->valuestring, "ap") == 0;
+        const bool valid = cJSON_IsString(mode) &&
+            (ap || strcmp(mode->valuestring, "sta") == 0) &&
+            cJSON_IsString(ssid) && strlen(ssid->valuestring) >= 1 &&
+            strlen(ssid->valuestring) <= WIFI_SSID_MAX &&
+            cJSON_IsString(password) && network_valid_wifi_password(password->valuestring, ap) &&
+            cJSON_IsString(ota) && (ota->valuestring[0] == '\0' ||
+            (strlen(ota->valuestring) >= 8 && strlen(ota->valuestring) <= WEB_PASS_MAX));
+        if (!valid) {
+            cJSON_Delete(root);
+            ESP_LOGW(TAG, "Invalid Wi-Fi settings");
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Revisa modo, SSID y claves (red propia: 8 a 63; web: 8 a 48)");
+        }
+        err = save_configuration(ssid->valuestring, password->valuestring,
+                                  ota->valuestring[0] ? ota->valuestring : web_password, ap);
+    }
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not persist Wi-Fi settings: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No se pudo guardar la configuracion");
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, "Configuracion guardada. Reiniciando; vuelve a conectar a la red elegida.");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return ESP_OK;
 }
 
 static esp_err_t write_update(httpd_req_t *req)
@@ -300,7 +473,7 @@ static esp_err_t telemetry_handler(httpd_req_t *req)
 static httpd_handle_t start_web_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 14;
     config.stack_size = 8192;
     config.recv_wait_timeout = 30;
     config.send_wait_timeout = 10;
@@ -320,6 +493,12 @@ static httpd_handle_t start_web_server(void)
     const httpd_uri_t css_uri = {.uri = "/panel.css", .method = HTTP_GET, .handler = index_handler};
     const httpd_uri_t js_uri = {.uri = "/panel.js", .method = HTTP_GET, .handler = index_handler};
     const httpd_uri_t screen_uri = {.uri = "/api/screen.bmp", .method = HTTP_GET, .handler = screen_handler};
+    const httpd_uri_t wifi_uri = {.uri = "/wifi", .method = HTTP_GET, .handler = index_handler};
+    const httpd_uri_t wifi_js_uri = {.uri = "/wifi.js", .method = HTTP_GET, .handler = index_handler};
+    const httpd_uri_t dashboard_uri = {.uri = "/panel", .method = HTTP_GET, .handler = index_handler};
+    const httpd_uri_t scan_uri = {.uri = "/api/wifi/scan", .method = HTTP_GET, .handler = wifi_scan_handler};
+    const httpd_uri_t configure_uri = {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_configuration_handler};
+    const httpd_uri_t reset_uri = {.uri = "/api/wifi/reset", .method = HTTP_POST, .handler = wifi_configuration_handler};
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_uri));
@@ -328,6 +507,12 @@ static httpd_handle_t start_web_server(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &css_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &js_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &screen_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &wifi_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &wifi_js_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &dashboard_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &scan_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &configure_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &reset_uri));
     return server;
 }
 
@@ -356,11 +541,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static bool load_configuration(char *ssid, char *wifi_pass, char *ota_pass)
+static bool load_configuration(char *ssid, char *wifi_pass, char *ota_pass, bool *create_network)
 {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(CONFIG_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGE(TAG, "Could not open Wi-Fi settings: %s", esp_err_to_name(err));
+        }
         return false;
     }
 
@@ -374,19 +562,38 @@ static bool load_configuration(char *ssid, char *wifi_pass, char *ota_pass)
     if (err == ESP_OK) {
         err = nvs_get_str(handle, CONFIG_WEB_PASS_KEY, ota_pass, &ota_len);
     }
+    uint8_t ap_mode = 0;
+    if (err == ESP_OK) {
+        const esp_err_t mode_err = nvs_get_u8(handle, CONFIG_AP_MODE_KEY, &ap_mode);
+        if (mode_err != ESP_OK && mode_err != ESP_ERR_NVS_NOT_FOUND) {
+            err = mode_err;
+        }
+    }
     nvs_close(handle);
-    return err == ESP_OK && ssid[0] != '\0' && ota_pass[0] != '\0';
+    *create_network = ap_mode == 1;
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "Could not read Wi-Fi settings: %s", esp_err_to_name(err));
+    }
+    return err == ESP_OK && ap_mode <= 1 && ssid[0] != '\0' && strlen(ota_pass) >= 8 &&
+           network_valid_wifi_password(wifi_pass, *create_network);
 }
 
-static void save_configuration(const char *ssid, const char *wifi_pass, const char *ota_pass)
+static esp_err_t save_configuration(const char *ssid, const char *wifi_pass,
+                                    const char *ota_pass, bool create_network)
 {
     nvs_handle_t handle;
-    ESP_ERROR_CHECK(nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &handle));
-    ESP_ERROR_CHECK(nvs_set_str(handle, CONFIG_SSID_KEY, ssid));
-    ESP_ERROR_CHECK(nvs_set_str(handle, CONFIG_WIFI_PASS_KEY, wifi_pass));
-    ESP_ERROR_CHECK(nvs_set_str(handle, CONFIG_WEB_PASS_KEY, ota_pass));
-    ESP_ERROR_CHECK(nvs_commit(handle));
+    esp_err_t err = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if ((err = nvs_set_str(handle, CONFIG_SSID_KEY, ssid)) == ESP_OK &&
+        (err = nvs_set_str(handle, CONFIG_WIFI_PASS_KEY, wifi_pass)) == ESP_OK &&
+        (err = nvs_set_str(handle, CONFIG_WEB_PASS_KEY, ota_pass)) == ESP_OK &&
+        (err = nvs_set_u8(handle, CONFIG_AP_MODE_KEY, create_network ? 1 : 0)) == ESP_OK) {
+        err = nvs_commit(handle);
+    }
     nvs_close(handle);
+    return err;
 }
 
 static void initialize_wifi(void)
@@ -397,7 +604,9 @@ static void initialize_wifi(void)
         ESP_ERROR_CHECK(esp_netif_init());
         ESP_ERROR_CHECK(esp_event_loop_create_default());
         station_netif = esp_netif_create_default_wifi_sta();
+        access_point_netif = esp_netif_create_default_wifi_ap();
         ESP_ERROR_CHECK(station_netif == NULL ? ESP_FAIL : ESP_OK);
+        ESP_ERROR_CHECK(access_point_netif == NULL ? ESP_FAIL : ESP_OK);
         ESP_ERROR_CHECK(esp_netif_set_hostname(station_netif, "esp32axpertvmii"));
 
         const wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
@@ -501,6 +710,34 @@ static bool connect_to_wifi(const char *ssid, const char *password)
     return false;
 }
 
+static void start_access_point(const char *ssid, const char *password)
+{
+    initialize_wifi();
+    wifi_connection_requested = false;
+    if (wifi_started) {
+        ESP_ERROR_CHECK(esp_wifi_stop());
+        wifi_started = false;
+    }
+    wifi_config_t config = {0};
+    config.ap.ssid_len = strlen(ssid);
+    memcpy(config.ap.ssid, ssid, config.ap.ssid_len);
+    strlcpy((char *)config.ap.password, password, sizeof(config.ap.password));
+    config.ap.channel = 1;
+    config.ap.max_connection = 4;
+    config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    wifi_started = true;
+    access_point_active = true;
+    esp_netif_ip_info_t info = {0};
+    ESP_ERROR_CHECK(esp_netif_get_ip_info(access_point_netif, &info));
+    display_show_network(ip4addr_ntoa((const ip4_addr_t *)&info.ip));
+    display_show_message("WIFI PROPIA", ssid);
+    ESP_LOGI(TAG, "Access point ready; setup at http://" IPSTR "/ (admin and configured web password)",
+             IP2STR(&info.ip));
+}
+
 void network_set_axpert_status(bool hid_found, bool connected)
 {
     axpert_hid_found = hid_found;
@@ -519,36 +756,25 @@ void network_start(void)
     char ssid[WIFI_SSID_MAX + 1] = {0};
     char wifi_pass[WIFI_PASS_MAX + 1] = {0};
     char ota_pass[WEB_PASS_MAX + 1] = {0};
-    if (!load_configuration(ssid, wifi_pass, ota_pass)) {
+    bool create_network = false;
+    if (!load_configuration(ssid, wifi_pass, ota_pass, &create_network)) {
         ESP_LOGI(TAG, "Starting on-screen Wi-Fi and OTA password setup");
         if (!display_configure_wifi(ssid, sizeof(ssid), wifi_pass, sizeof(wifi_pass),
-                                    ota_pass, sizeof(ota_pass))) {
+                                    ota_pass, sizeof(ota_pass), &create_network)) {
             ESP_LOGE(TAG, "Touch-screen Wi-Fi setup failed");
             display_show_message("ERROR TACTIL", "REVISA PANTALLA");
             return;
         }
-        save_configuration(ssid, wifi_pass, ota_pass);
+        ESP_ERROR_CHECK(save_configuration(ssid, wifi_pass, ota_pass, create_network));
     }
 
     strlcpy(web_password, ota_pass, sizeof(web_password));
-    if (!connect_to_wifi(ssid, wifi_pass)) {
-        ESP_LOGE(TAG, "Could not connect to configured Wi-Fi network");
-        display_show_message("ERROR WIFI", "CONFIGURA DE NUEVO");
-        memset(ssid, 0, sizeof(ssid));
-        memset(wifi_pass, 0, sizeof(wifi_pass));
-        memset(ota_pass, 0, sizeof(ota_pass));
-        if (!display_configure_wifi(ssid, sizeof(ssid), wifi_pass, sizeof(wifi_pass),
-                                    ota_pass, sizeof(ota_pass))) {
-            ESP_LOGE(TAG, "Could not reconfigure Wi-Fi from the touch screen");
-            return;
-        }
-        save_configuration(ssid, wifi_pass, ota_pass);
-        strlcpy(web_password, ota_pass, sizeof(web_password));
-        if (!connect_to_wifi(ssid, wifi_pass)) {
-            ESP_LOGE(TAG, "Wi-Fi reconnection failed after reconfiguration");
-            display_show_message("ERROR WIFI", "REVISA CREDENCIALES");
-            return;
-        }
+    if (create_network) {
+        start_access_point(ssid, wifi_pass);
+    } else if (!connect_to_wifi(ssid, wifi_pass)) {
+        ESP_LOGW(TAG, "Configured Wi-Fi unavailable; starting recovery AP without erasing credentials");
+        start_access_point("Esp32AxpertVMII", web_password);
+        display_show_message("WIFI PROPIA", "Esp32AxpertVMII / usa clave web");
     }
 
     web_server = start_web_server();
@@ -564,7 +790,23 @@ void network_start(void)
     ESP_LOGI(TAG, "Local name: http://esp32axpertvmii.local/");
 
     esp_netif_ip_info_t ip_info = {0};
-    ESP_ERROR_CHECK(esp_netif_get_ip_info(station_netif, &ip_info));
+    ESP_ERROR_CHECK(esp_netif_get_ip_info(access_point_active ?
+                                         access_point_netif : station_netif, &ip_info));
     ESP_LOGI(TAG, "Local status and OTA page: http://%s/", ip4addr_ntoa((const ip4_addr_t *)&ip_info.ip));
-    display_show_network(ip4addr_ntoa((const ip4_addr_t *)&ip_info.ip));
+    if (!access_point_active) {
+        display_show_network(ip4addr_ntoa((const ip4_addr_t *)&ip_info.ip));
+    }
+    unsigned int disconnected_seconds = 0;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (!access_point_active) {
+            if (xEventGroupGetBits(wifi_event_group) & WIFI_CONNECTED_BIT) {
+                disconnected_seconds = 0;
+            } else if (++disconnected_seconds >= 30) {
+                ESP_LOGW(TAG, "Wi-Fi unavailable for 30 seconds; enabling recovery AP");
+                start_access_point("Esp32AxpertVMII", web_password);
+                display_show_message("WIFI PROPIA", "Esp32AxpertVMII / usa clave web");
+            }
+        }
+    }
 }

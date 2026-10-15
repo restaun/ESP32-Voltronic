@@ -13,7 +13,8 @@ function Assert-Condition([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-foreach ($uri in @('/', '/panel.css', '/panel.js', '/api/panel', '/api/screen.bmp')) {
+foreach ($uri in @('/', '/panel', '/panel.css', '/panel.js', '/api/panel', '/api/screen.bmp',
+                   '/wifi', '/wifi.js', '/api/wifi/scan')) {
     $code = $null
     try {
         $response = Invoke-WebRequest "$BaseUri$uri" -UseBasicParsing -TimeoutSec 15
@@ -23,6 +24,18 @@ foreach ($uri in @('/', '/panel.css', '/panel.js', '/api/panel', '/api/screen.bm
         $code = [int]$_.Exception.Response.StatusCode
     }
     Assert-Condition ($code -eq 401) "Unprotected dashboard endpoint: $uri ($code)"
+}
+
+foreach ($uri in @('/api/wifi', '/api/wifi/reset')) {
+    $code = $null
+    try {
+        $response = Invoke-WebRequest "$BaseUri$uri" -Method Post -ContentType 'application/json' -Body '{}' -UseBasicParsing -TimeoutSec 15
+        $code = [int]$response.StatusCode
+    } catch {
+        if ($null -eq $_.Exception.Response) { throw }
+        $code = [int]$_.Exception.Response.StatusCode
+    }
+    Assert-Condition ($code -eq 401) "Unprotected Wi-Fi configuration endpoint: $uri ($code)"
 }
 $page = Invoke-WebRequest "$BaseUri/" -Headers $headers -UseBasicParsing -TimeoutSec 15
 Assert-Condition ($page.Content.Contains('data-card="battery"')) 'Dashboard HTML not served'

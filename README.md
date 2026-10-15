@@ -38,14 +38,48 @@ al inversor. La selección de USB (en vez de CAN) se establece por el CH422G.
 
 ## Wi-Fi, estado y OTA
 
-En el primer arranque, la pantalla táctil busca redes Wi-Fi de 2,4 GHz.
-Toca tu red en la lista y escribe su contraseña y una contraseña OTA de al
-menos ocho caracteres. La lista permite cambiar de página y repetir la
-búsqueda con **BUSCAR**; **MANUAL** permite introducir una red oculta.
-Desde el teclado puedes volver a la lista con **BUSCAR RED**.
+Desde la version **0.4.0**, si no hay configuracion guardada, la primera
+pantalla es **CONFIGURAR WIFI**, con dos opciones:
+
+- **CONECTAR A UNA WIFI**: busca redes de 2,4 GHz; selecciona tu red y escribe
+  su clave y una clave web/OTA de 8 a 48 caracteres. **MANUAL** permite una
+  red oculta. Una red abierta admite clave vacia; una protegida admite
+  8 a 63 bytes o una PSK hexadecimal de 64 caracteres.
+- **CREAR UNA WIFI**: introduce el nombre de la red propia, una clave WPA2
+  de 8 a 63 bytes y la clave web/OTA. No requiere router ni Internet.
+
+La lista permite cambiar de pagina y repetir la busqueda con **BUSCAR**.
+Desde el teclado **VOLVER** regresa a la eleccion del modo.
 El teclado comienza en minúsculas y permite alternar con **MAYUS** / **minus**;
 el botón **123** muestra números y símbolos. Una vez conectada, la pantalla
-muestra la IP local. Si la conexión falla, vuelve a la selección de redes.
+muestra la IP local.
+
+En modo red propia, conecta el ordenador o telefono a la red que has creado
+y abre **http://192.168.4.1/**. La primera pagina web es la configuracion de
+red; incluye un enlace al panel y OTA. Usa el usuario `admin` y la clave
+web/OTA elegida en la pantalla (puede ser distinta de la clave WPA2).
+El dispositivo admite hasta cuatro clientes. Es normal que el telefono
+indique «sin Internet»; no hay portal cautivo ni apertura automatica.
+
+En cualquiera de los modos, **Datos y OTA / Configurar Wi-Fi** abre `/wifi`.
+Permite buscar redes, cambiar entre conexion al router y red propia,
+cambiar opcionalmente la clave web y guardar con reinicio. Una clave web
+vacia conserva la actual. El panel siempre esta disponible en `/panel`.
+
+Si la red guardada no responde en 30 segundos al arrancar, o permanece
+desconectada durante 30 segundos en funcionamiento, se activa una red de
+recuperacion **Esp32AxpertVMII**, cuya clave WPA2 es la clave web/OTA actual.
+Abre `http://192.168.4.1/` para reconfigurar. No se borran las claves
+anteriores; un reinicio vuelve a intentar la red guardada. Mientras la red
+de recuperacion esta activa, el cambio a la red de casa requiere guardar
+su configuracion desde `/wifi` o reiniciar.
+
+**Restablecer Wi-Fi y acceso web**, en `/wifi`, requiere autenticacion y
+confirmacion. Borra exclusivamente la configuracion de red y acceso web,
+reinicia y vuelve a la pantalla tactil inicial. No borra todo NVS ni cambia
+ajustes del inversor. No es necesario restablecer para publicar el proyecto:
+las claves se guardan en NVS de cada placa, nunca en el repositorio ni
+en `firmware.bin`. Las actualizaciones OTA conservan esta configuracion.
 
 Abre `http://<IP-local>/` desde un equipo de la misma red. La página muestra
 el estado del HID y si el Axpert respondió correctamente a `QPI`/`PI30`.
@@ -59,7 +93,7 @@ la IP que muestra la pantalla sigue funcionando.
 
 ## Panel energético en LCD y web
 
-El firmware **0.3.3** incorpora un panel oscuro inspirado en el panel de
+El firmware **0.4.0** incorpora un panel oscuro inspirado en el panel de
 VoltronicSerial, adaptado a la LCD de 1024 x 600 y a navegadores de escritorio
 y móvil. Incluye placas, entrada AC, Axpert, salida a casa, batería y ESP32.
 Todos los valores energéticos proceden del Axpert; no se usan Shelly,
@@ -129,7 +163,7 @@ históricos. Los recursos HTML/CSS/JS se declaran tanto en CMake como en
 Pruebas del panel, sin dependencias Node adicionales:
 
 ```powershell
-node --test tests\panel.test.cjs
+node --test tests\panel.test.cjs tests\wifi.test.cjs
 .\tests\test-live-panel.ps1 -Credential (Get-Credential -UserName admin)
 ```
 
@@ -197,6 +231,11 @@ además la respuesta `QPI` y su CRC antes de declarar conexión. Variantes con
 otro PID necesitarán ajustar esa identificación.
 
 ## Prueba en la placa
+
+La version 0.4.0 incorpora configuracion web, seleccion tactil de ambos
+modos y recuperacion por punto de acceso. Su prueba fisica de primer
+arranque, cambio de modo y restablecimiento esta pendiente; las
+observaciones siguientes corresponden a versiones anteriores.
 
 La version 0.3.3 se ha cargado por USB-UART con hash verificado. El arranque
 confirma CPU a 240 MHz, PSRAM a 80 MHz y reloj RGB de 20 MHz. La web responde
