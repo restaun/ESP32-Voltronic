@@ -47,6 +47,7 @@ static const char *TAG = "telemetry";
 static result_t results[QUERY_COUNT];
 static SemaphoreHandle_t mutex;
 static size_t cursor;
+static uint32_t connection_generation;
 
 static void crc_bytes(const uint8_t *data, size_t length, uint8_t *high, uint8_t *low)
 {
@@ -101,6 +102,7 @@ void telemetry_reset(void)
 {
     xSemaphoreTake(mutex, portMAX_DELAY);
     memset(results, 0, sizeof(results));
+    ++connection_generation;
     for (size_t i = 0; i < QUERY_COUNT; ++i) {
         strlcpy(results[i].status, "pending", sizeof(results[i].status));
         if (i >= DATED_QUERY_START) {
@@ -116,6 +118,7 @@ void telemetry_reset(void)
 void telemetry_disconnected(void)
 {
     xSemaphoreTake(mutex, portMAX_DELAY);
+    ++connection_generation;
     for (size_t i = 0; i < QUERY_COUNT; ++i) {
         strlcpy(results[i].status, "disconnected", sizeof(results[i].status));
     }
@@ -135,9 +138,23 @@ const char *telemetry_next_query(size_t *index)
             command = queries[candidate].command;
             break;
         }
+
     }
     xSemaphoreGive(mutex);
     return command;
+}
+
+void telemetry_refresh_query(const char *command)
+{
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    for (size_t i = 0; i < QUERY_COUNT; ++i) {
+        if (strcmp(queries[i].command, command) == 0) {
+            results[i].next_due_ms = 0;
+            cursor = i;
+            break;
+        }
+    }
+    xSemaphoreGive(mutex);
 }
 
 void telemetry_sent(size_t index)
@@ -408,10 +425,24 @@ static cJSON *decode_fields(const char *command, const char *body)
         }
     } else if (strcmp(command, "QFLAG") == 0) {
         bool enabled = false;
+        unsigned int groups = 0;
+        uint32_t seen_flags = 0;
         for (const char *flag = body + 1; *flag != '\0'; ++flag) {
             if (*flag == 'E' || *flag == 'D') {
+                const unsigned int group = *flag == 'E' ? 1 : 2;
+                if (groups & group) {
+                    cJSON_Delete(fields);
+                    return NULL;
+                }
+                groups |= group;
                 enabled = *flag == 'E';
-            } else if (*flag >= 'a' && *flag <= 'z') {
+            } else if (groups != 0 && *flag >= 'a' && *flag <= 'z') {
+                const uint32_t bit = UINT32_C(1) << (*flag - 'a');
+                if (seen_flags & bit) {
+                    cJSON_Delete(fields);
+                    return NULL;
+                }
+                seen_flags |= bit;
                 char name[] = "flag_a";
                 name[5] = *flag;
                 cJSON_AddBoolToObject(fields, name, enabled);
@@ -419,6 +450,10 @@ static cJSON *decode_fields(const char *command, const char *body)
                 cJSON_Delete(fields);
                 return NULL;
             }
+        }
+        if (groups == 0 || seen_flags == 0) {
+            cJSON_Delete(fields);
+            return NULL;
         }
     } else {
         cJSON_AddStringToObject(fields, "value", body + 1);
@@ -567,6 +602,9 @@ cJSON *telemetry_json(void)
     const int64_t now = esp_timer_get_time() / 1000;
     cJSON_AddNumberToObject(root, "uptime_ms", (double)now);
     cJSON_AddStringToObject(root, "source", "Axpert USB HID; read-only");
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    cJSON_AddNumberToObject(root, "connection_generation", connection_generation);
+    xSemaphoreGive(mutex);
     cJSON *items = cJSON_AddObjectToObject(root, "queries");
     if (items == NULL) {
         cJSON_Delete(root);

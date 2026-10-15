@@ -37,6 +37,7 @@ cJSON *telemetry_panel_json(void);
 void telemetry_init(void);
 void telemetry_reset(void);
 void telemetry_disconnected(void);
+void telemetry_refresh_query(const char *command);
 const char *telemetry_next_query(size_t *index);
 void telemetry_sent(size_t index);
 void telemetry_error(size_t index, const char *error);

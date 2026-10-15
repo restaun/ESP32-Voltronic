@@ -16,7 +16,7 @@ function Assert-Condition([bool]$Condition, [string]$Message) {
 }
 
 $status = Invoke-RestMethod "$BaseUri/api/status" -Headers $headers -TimeoutSec 15
-Assert-Condition ($status.version -eq '0.4.2') 'Unexpected firmware version'
+Assert-Condition ($status.version -eq '0.5.0') 'Unexpected firmware version'
 Assert-Condition ($status.hostname -eq 'esp32axpertvmii.local') 'Unexpected hostname'
 
 $baseQueries = @(

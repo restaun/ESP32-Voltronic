@@ -7,6 +7,8 @@
     const modes = {P:"Encendido", S:"En espera", L:"En red", B:"En batería", F:"Fallo",
         H:"Ahorro de energía", D:"Apagado", C:"Cargando", Y:"Bypass", E:"Modo ECO"};
     let panel = null, host = null, pending = false, selected = null, uploading = false;
+    let settings = null, settingsError = "", settingsFetchError = "", settingsSignature = "", saving = false, settingsRevision = 0;
+    let ownJob = null;
     const cards = [...document.querySelectorAll("[data-card]")];
     const note = "Solo datos del Axpert. Potencia de entrada AC no disponible. Corriente neta y potencia de batería calculadas: carga menos descarga; positivo = carga. No es una medición directa del BMS.";
     const labels = {
@@ -27,7 +29,7 @@
         grid:["ac_input_voltage_v","ac_input_frequency_hz"],
         house:["ac_output_power_w","ac_output_apparent_power_va","ac_output_voltage_v","ac_output_frequency_hz","ac_output_load_percent","load_total_energy_wh"],
         battery:["battery_soc_percent","battery_voltage_v","battery_charge_current_a","battery_discharge_current_a","battery_net_current_a","battery_power_estimate_w","bms_soc_percent"],
-        inverter:["inverter_temperature_c","dc_bus_voltage_v","ac_output_power_w"]
+        inverter:["inverter_temperature_c","dc_bus_voltage_v"]
     };
     function layout() {
         const bounds = document.querySelector("main").getBoundingClientRect();
@@ -56,9 +58,108 @@
         }
     }
     new ResizeObserver(layout).observe(document.querySelector("main"));
+    const extraLabels = {QOPPT:"Horario de prioridad de salida (00 a 23 h)", QCHPT:"Horario de prioridad de carga (00 a 23 h)",
+        QDI:"Valores de fábrica (solo consulta; no restablecer)", QT:"Reloj del Axpert", QID:"Número de serie",
+        QSID:"Identificación ampliada", QVFW:"Firmware principal", QVFW2:"Firmware secundario",
+        QVFW3:"Firmware del panel Axpert", "VERFW:":"Versión remota", QMN:"Modelo",
+        QGMN:"Código general de modelo", QBMS:"Límites y estado comunicados por el BMS al Axpert",
+        QFLAG:"Indicadores completos (incluidas opciones de otros modelos)", QPIRI:"Parámetros nominales y configuración completos",
+        QBEQI:"Ecualización: respuesta completa", QDOP:"Segunda salida: respuesta completa"};
+    function renderSettings() {
+        if (!selected) return;
+        $("settings-section").hidden = selected === "esp32";
+        if (selected === "esp32") return;
+        const state = settings?.job;
+        const active = saving || settings?.busy;
+        let message = settingsError || settingsFetchError || (settings ? state?.message || "Ajustes leídos por USB; no se han enviado cambios." : "Consultando ajustes...");
+        if (ownJob !== null && state && state.id !== ownJob) {
+            message = "Otra sesión ha enviado un cambio. Comprueba los valores actuales; no se puede confirmar aquí tu operación anterior.";
+        }
+        $("settings-status").textContent = message;
+        $("settings-status").classList.toggle("error", Boolean(settingsError || settingsFetchError) ||
+            ["uncertain","rejected","mismatch","cancelled"].includes(state?.state) || (ownJob !== null && state?.id !== ownJob));
+        const entries = (settings?.settings || []).filter(s => s.group === selected);
+        const additional = (settings?.additional || []).filter(s => s.group === selected);
+        const signature = JSON.stringify([selected, entries, additional.map(e => [e.query,e.result?.raw,e.result?.stale,e.result?.status]),active]);
+        if (signature === settingsSignature) return;
+        settingsSignature = signature;
+        $("settings-list").replaceChildren();
+        for (const s of entries) {
+            const row = document.createElement("div"); row.className = "setting";
+            const label = document.createElement("label"), current = document.createElement("span");
+            label.textContent = s.label; label.htmlFor = "setting-" + s.id;
+            current.className = "setting-current";
+            current.textContent = !finite(s.value) ? "Sin datos" :
+                (s.options.find(o => o.value === s.value)?.label ?? String(s.value));
+            row.append(label, current);
+            const explanation = document.createElement("small");
+            explanation.textContent = s.query + " · " + (s.editable ? "Opciones del protocolo; soporte final según respuesta del Axpert." :
+                (s.reason || "Solo consulta")) + (!finite(s.value) ? " · " + s.status : "");
+            row.append(explanation);
+            if (s.editable) {
+                const controls = document.createElement("div"); controls.className = "setting-controls";
+                const input = document.createElement(s.options.length ? "select" : "input");
+                input.id = "setting-" + s.id;
+                if (s.options.length) {
+                    if (!s.options.some(o => o.value === s.value)) {
+                        const unknown = document.createElement("option"); unknown.value = ""; unknown.textContent = "Elige un valor"; unknown.disabled = true; input.append(unknown);
+                    }
+                    for (const o of s.options) {
+                        const option = document.createElement("option"); option.value = String(o.value); option.textContent = o.label; input.append(option);
+                    }
+                    input.value = s.options.some(o => o.value === s.value) ? String(s.value) : "";
+                } else {
+                    input.type = "number"; input.min = s.min; input.max = s.max; input.step = s.step; input.value = String(s.value);
+                }
+                input.disabled = Boolean(active);
+                const apply = document.createElement("button"); apply.textContent = "Aplicar"; apply.disabled = Boolean(active);
+                apply.onclick = () => applySetting(s, input);
+                controls.append(input, apply); row.append(controls);
+            }
+            $("settings-list").append(row);
+        }
+        $("settings-additional").replaceChildren();
+        for (const entry of additional) {
+            const details = document.createElement("details"), summary = document.createElement("summary"), body = document.createElement("pre");
+            summary.textContent = extraLabels[entry.query] || entry.query;
+            const result = entry.result;
+            const valid = result && !result.stale && result.decoded;
+            if (valid && ["QOPPT","QCHPT"].includes(entry.query)) {
+                const priorities = entry.query === "QOPPT" ? ["Red primero","Solar primero","SBU"] : ["Red primero","Solar primero","Solar y red","Solo solar"];
+                const tokens = result.tokens || [];
+                body.textContent = tokens.length === 24 && tokens.every(t => /^[0-3]$/.test(t) && priorities[Number(t)])
+                    ? tokens.map((t,h) => String(h).padStart(2,"0") + ":00 · " + priorities[Number(t)]).join("\n")
+                    : "Formato de horario no reconocido: " + (result.raw || "Sin datos");
+            } else body.textContent = valid ? JSON.stringify(result.fields, null, 2) :
+                "Sin datos recientes · " + (result?.status || "pending");
+            details.append(summary, body); $("settings-additional").append(details);
+        }
+    }
+    async function applySetting(setting, input) {
+        if (saving || settings?.busy || uploading) return;
+        const value = input.value.trim() === "" ? NaN : Number(input.value);
+        const optionValid = setting.options.length ? setting.options.some(o => o.value === value) :
+            value >= setting.min && value <= setting.max && Math.abs((value-setting.min)/setting.step-Math.round((value-setting.min)/setting.step)) < 0.00001;
+        if (!finite(value) || !optionValid || value === setting.value) {
+            settingsError = "Elige un valor válido y distinto del actual."; renderSettings(); return;
+        }
+        const label = setting.options.find(o => o.value === value)?.label || String(value);
+        if (!confirm("¿Cambiar «" + setting.label + "» de " + setting.value + " a " + label +
+            " en el Axpert real?\nPuede afectar al suministro y a la batería. Comprueba sus especificaciones. No se reintentará automáticamente.")) return;
+        saving = true; settingsError = ""; ++settingsRevision; renderSettings();
+        try {
+            const response = await fetch("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({id:setting.id, value, previous:setting.value, confirm:true}), signal:AbortSignal.timeout(7000)});
+            if (!response.ok) throw new Error(await response.text());
+            settings = await response.json(); ownJob = settings.job.id;
+        } catch (error) {
+            settingsError = "No se puede confirmar el envío: " + error.message + ". Comprueba el valor antes de repetir; no se reintentará automáticamente.";
+        } finally { saving = false; ++settingsRevision; renderSettings(); }
+    }
     function detail() {
         if (!selected) return;
-        $("detail-title").textContent = cards.find(c => c.dataset.card === selected).querySelector("span:not(.icon)")?.textContent || "ESP32";
+        $("detail-title").textContent = selected === "inverter" ? "Axpert" :
+            cards.find(c => c.dataset.card === selected).querySelector("span:not(.icon)")?.textContent || "ESP32";
         $("detail-values").replaceChildren();
         const row = (name, value) => {
             const dt = document.createElement("dt"), dd = document.createElement("dd");
@@ -80,6 +181,7 @@
                 panel?.bms_available ? (panel.bms_connected ? "Conectado" : "Desconectado") : "Sin datos");
         }
         $("detail-note").textContent = note;
+        renderSettings();
     }
     function render() {
         const v = panel?.values || {};
@@ -102,7 +204,7 @@
         $("host-detail").textContent = host ? (host.wifi + "\n" + host.hostname + " · v" + host.version) : "No se puede acceder al ESP32";
         const age = panel?.measurements_age_ms;
         $("status").textContent = !host ? "Sin conexión con el ESP32" :
-            finite(age) && age >= 0 ? "Datos del Axpert por USB · hace " + (age/1000).toFixed(1) + " s · solo lectura" : "Sin medidas recientes del Axpert";
+            finite(age) && age >= 0 ? "Datos del Axpert por USB · hace " + (age/1000).toFixed(1) + " s" : "Sin medidas recientes del Axpert";
         $("status").classList.toggle("error", !host || !finite(age) || age < 0);
         const clock = panel?.inverter_clock;
         $("clock").textContent = clock && /^\d{14}$/.test(clock)
@@ -129,11 +231,17 @@
     async function refresh() {
         if (pending || uploading) return;
         pending = true;
+        const revision = settingsRevision;
         try {
-            const result = await Promise.all([get("/api/panel"), get("/api/status")]);
+            const result = await Promise.all([get("/api/panel"), get("/api/status"), get("/api/settings")
+                .then(value => { settingsFetchError = ""; return value; })
+                .catch(error => { settingsFetchError = "No se pueden consultar los ajustes: " + error.message; return null; })]);
             [panel, host] = result;
+            if (!saving && revision === settingsRevision) settings = result[2];
         } catch (error) {
             panel = null; host = null;
+            settings = null;
+            settingsFetchError = "Sin conexión con el ESP32; edición bloqueada.";
             $("ota-status").textContent = error.message;
         } finally {
             pending = false; render();
@@ -153,6 +261,9 @@
         catch (error) { $("raw").textContent = error.message; }
     };
     $("upload").onclick = async () => {
+        if (saving || settings?.busy) {
+            $("ota-status").textContent = "Espera a que termine la verificación del cambio del Axpert antes de actualizar."; return;
+        }
         const file = $("firmware").files[0];
         if (!file || !file.name.toLowerCase().endsWith(".bin") || file.size <= 0 || file.size > 4194304) {
             $("ota-status").textContent = "Selecciona un firmware.bin de hasta 4 MB."; return;

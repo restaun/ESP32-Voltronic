@@ -193,6 +193,70 @@ node --test tests\panel.test.cjs tests\wifi.test.cjs
 
 ## Adquisicion USB del Axpert
 
+### Ajustes en los popups web (0.5.0)
+
+La web clasifica 42 campos de configuracion consultados por USB. Que un
+campo figure en el protocolo no significa que el firmware del Axpert lo
+soporte. El panel LCD conserva sus vistas actuales; la edicion se realiza
+en los popups de la web.
+
+| Tarjeta | Configuraciones |
+| --- | --- |
+| Solar | Prioridad de carga, balance FV, condicion FV en paralelo y horario de carga |
+| Entrada AC | Rango UPS/electrodomesticos, corriente de carga de red, retorno a red y bypass |
+| Salida / Casa | Prioridad y horario de alimentacion, tension/frecuencia nominales, modo de salida y segunda salida |
+| Bateria | Tipo, corrientes, absorcion, flotacion, corte, retorno a bateria, SOC y ecualizacion |
+| Axpert | Zumbador, pantalla, alarmas, reinicios, registro de fallos, identidad, firmware, reloj y valores de fabrica |
+
+Los valores ausentes, rechazados, no interpretables o caducados aparecen
+como **Sin datos** y no se pueden editar. Los horarios se muestran de
+00 a 23 h y son de solo consulta, al igual que los ajustes de segunda
+salida, paralelo y variantes KING/MKSIII sin escritura o limites
+verificables para el modelo. Las respuestas completas se conservan.
+
+**GET /api/settings** devuelve `settings`, `additional`, `busy` y `job`.
+Cada ajuste incluye grupo, consulta de origen, valor actual o `null`,
+opciones o limites, `editable` y motivo de bloqueo. La escritura usa
+**POST /api/settings**, autenticacion y JSON con `id`, `value`, `previous`
+y `confirm: true`. No se admiten comandos arbitrarios.
+La respuesta 202 significa aceptado para procesar, nunca aplicado:
+solo `job.state: verified` confirma ACK con CRC valido y relectura
+coincidente del valor.
+
+**Aplicar** requiere confirmacion explicita. El servidor relee antes de
+escribir, comprueba el valor anterior y sus dependencias, serializa un
+solo cambio con las consultas USB y verifica el resultado. Un cambio de
+conexion o configuracion durante la espera cancela el envio. NAK, error
+USB, CRC invalido, timeout o relectura diferente no se presentan como
+exito. No hay reintentos automaticos de escritura: si el resultado es
+incierto, comprueba el valor real antes de repetir. OTA y guardar o
+restablecer Wi-Fi se bloquean mientras hay un ajuste pendiente.
+
+La escritura exige identidad PI30 y modelo `VMIII-` recientes. Las
+corrientes solo admiten pasos comunicados por `QMCHGCR`/`QMUCHGCR`.
+Las tensiones requieren bateria definida por usuario y limites del
+manual incluido: 24 V con 1500/3000 W o 48 V con 5000 W. La ecualizacion
+se habilita solo para AGM/inundada y esos modelos documentados; se bloquea
+para perfiles de litio y bateria definida por usuario.
+**Comprueba las especificaciones de tu bateria: el ESP32 no detecta su
+quimica real.** Las opciones enumeradas proceden del protocolo y pueden
+ser rechazadas con NAK; no se prueban mediante escrituras.
+No se exponen calibracion, ATE, borrado de historicos, restablecimiento de
+fabrica ni activacion inmediata de ecualizacion.
+
+Pruebas C sin hardware con un compilador nativo o Zig y el cJSON incluido
+en ESP-IDF, sin nuevas dependencias del firmware:
+
+```powershell
+.\tests\test-inverter-settings.ps1 -Compiler gcc
+# Alternativa con Zig:
+.\tests\test-inverter-settings.ps1 -Compiler zig -Zig
+```
+
+Cubren deteccion, limites y coherencia, codificacion de comandos,
+relectura previa, ACK y verificacion posterior, NAK, CRC, caducidad,
+timeout y cambios de conexion. No envian comandos al Axpert.
+
 El firmware consulta una lista cerrada de comandos de lectura:
 
 - Identificacion: `QPI`, `QID`, `QSID`, `QMN`, `QGMN`.
@@ -207,7 +271,9 @@ El firmware consulta una lista cerrada de comandos de lectura:
   dia indicados por el reloj del inversor: `QEY`, `QEM`, `QED`, `QLY`,
   `QLM`, `QLD` con su fecha. No se cambia el reloj del Axpert.
 
-No cambia ajustes ni fuerza carga, descarga o ecualizacion. Algunas consultas
+El sondeo automatico no cambia ajustes ni fuerza carga, descarga o
+ecualizacion; las escrituras anteriores requieren **Aplicar** y
+confirmacion. Algunas consultas
 son opcionales o propias de otras variantes: un `NAK` se registra como
 `unsupported_nak` y se reintenta a los diez minutos, no como una lectura cero.
 No se recorren anos, meses o dias anteriores ni otros equipos en paralelo.

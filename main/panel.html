@@ -22,8 +22,11 @@
   <button class="node battery" data-card="battery"><span class="icon" aria-hidden="true">▰</span><span>Batería · datos Axpert</span><strong id="battery-soc">Sin datos</strong><small id="battery-detail">Sin datos</small><small id="battery-source">SOC informado por el inversor</small></button>
 </div>
 </main>
-<footer><span id="energy">Energía acumulada: sin datos</span><span id="notice" role="status">Solo lectura · Toca una tarjeta para ver sus datos</span></footer>
-<dialog id="detail"><div class="dialog-heading"><h2 id="detail-title">Datos</h2><button id="close-detail">Cerrar</button></div><dl id="detail-values"></dl><p id="detail-note"></p></dialog>
+<footer><span id="energy">Energía acumulada: sin datos</span><span id="notice" role="status">Toca una tarjeta para ver datos y ajustes del Axpert</span></footer>
+<dialog id="detail"><div class="dialog-heading"><h2 id="detail-title">Datos</h2><button id="close-detail">Cerrar</button></div><dl id="detail-values"></dl><p id="detail-note"></p>
+<section id="settings-section"><h3>Configuración del Axpert</h3>
+<p class="muted">Consultar no cambia nada. Cada cambio requiere confirmación y relectura por USB. Las opciones documentadas pueden ser rechazadas por el firmware del inversor. No modifiques tensiones, química ni ecualización sin comprobar las especificaciones de tu batería.</p>
+<p id="settings-status" role="status" aria-live="polite"></p><div id="settings-list"></div><div id="settings-additional"></div></section></dialog>
 <dialog id="tools"><div class="dialog-heading"><h2>Datos y mantenimiento</h2><button id="close-tools">Cerrar</button></div>
 <p>Solo datos del Axpert por USB. <a href="/api/axpert" target="_blank" rel="noopener">Abrir JSON completo</a> · <a href="/api/screen.bmp" target="_blank" rel="noopener">Ver captura de la LCD</a></p>
 <p><a href="/wifi">Configurar Wi-Fi / crear red propia / restablecer</a></p>

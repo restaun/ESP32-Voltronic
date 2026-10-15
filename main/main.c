@@ -17,6 +17,7 @@
 #include "display.h"
 #include "network.h"
 #include "telemetry.h"
+#include "inverter_settings.h"
 
 #define AXPERT_USB_VID 0x0665
 #define AXPERT_VMIII_USB_PID 0x5161
@@ -38,6 +39,8 @@ static int64_t next_query_at_ms;
 static size_t query_index;
 static const char *query_command;
 static int64_t last_pi30_at_ms;
+static bool setting_pending;
+static char setting_command[32];
 
 typedef enum {
     APP_EVENT_DEVICE_CONNECTED,
@@ -126,17 +129,24 @@ static bool response_is_axpert_pi30(const uint8_t *frame, size_t length)
            telemetry_valid_frame(frame, length);
 }
 
+static void command_error(const char *error)
+{
+    if (setting_pending) inverter_settings_error(error);
+    else telemetry_error(query_index, error);
+}
+
 static void send_next_query(void)
 {
-    query_command = telemetry_next_query(&query_index);
+    setting_pending = inverter_settings_next(setting_command, sizeof(setting_command));
+    query_command = setting_pending ? setting_command : telemetry_next_query(&query_index);
     if (query_command == NULL) {
         return;
     }
-    uint8_t frame[32] = {0};
+    uint8_t frame[40] = {0};
     const size_t frame_length = telemetry_build_frame(query_command, frame, sizeof(frame));
-    telemetry_sent(query_index);
+    if (!setting_pending) telemetry_sent(query_index);
     if (frame_length == 0) {
-        telemetry_error(query_index, "command_too_long");
+        command_error("command_too_long");
         return;
     }
 
@@ -152,13 +162,13 @@ static void send_next_query(void)
                                                           report, sizeof(report));
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "%s HID Set_Report failed: %s", query_command, esp_err_to_name(err));
-            telemetry_error(query_index, "usb_send_error");
+            command_error("usb_send_error");
             query_pending = false;
             next_query_at_ms = esp_timer_get_time() / 1000 + QUERY_TIMEOUT_MS + 1000;
             return;
         }
     }
-    ESP_LOGI(TAG, "Sent %s inquiry", query_command);
+    ESP_LOGI(TAG, "Sent %s %s", query_command, setting_pending ? "setting" : "inquiry");
 }
 
 static void handle_hid_connected(hid_host_device_handle_t handle)
@@ -241,7 +251,7 @@ static void handle_input_report(const app_event_t *event)
             ESP_LOGE(TAG, "Axpert HID response exceeded the buffer capacity");
             response_length = 0;
             query_pending = false;
-            telemetry_error(query_index, "response_too_long");
+            command_error("response_too_long");
             next_query_at_ms = esp_timer_get_time() / 1000 + QUERY_TIMEOUT_MS + 1000;
             return;
         }
@@ -252,7 +262,12 @@ static void handle_input_report(const app_event_t *event)
         }
 
         query_pending = false;
-        telemetry_reply(query_index, response, response_length);
+        if (setting_pending) {
+            inverter_settings_reply(response, response_length);
+        } else {
+            telemetry_reply(query_index, response, response_length);
+            inverter_settings_observe(query_command);
+        }
         if (strcmp(query_command, "QPI") == 0 && response_is_axpert_pi30(response, response_length)) {
             if (!inverter_connected) {
                 ESP_LOGI(TAG, "Axpert PI30 response validated; inverter is connected");
@@ -289,6 +304,7 @@ static void handle_hid_event(const app_event_t *event)
             inverter_connected = false;
             network_set_axpert_status(false, false);
             telemetry_disconnected();
+            inverter_settings_disconnect();
             last_pi30_at_ms = 0;
             query_pending = false;
             response_length = 0;
@@ -316,6 +332,7 @@ static void application_task(void *arg)
         if (xQueueReceive(hid_event_queue, &event, pdMS_TO_TICKS(100)) == pdPASS) {
             handle_hid_event(&event);
         }
+        inverter_settings_tick();
 
         if (active_interface == NULL) {
             continue;
@@ -323,7 +340,7 @@ static void application_task(void *arg)
 
         const int64_t now_ms = esp_timer_get_time() / 1000;
         if (query_pending && now_ms - query_sent_at_ms >= QUERY_TIMEOUT_MS) {
-            telemetry_error(query_index, "timeout");
+            command_error("timeout");
             query_pending = false;
             response_length = 0;
             if (strcmp(query_command, "QPI") == 0) {
@@ -353,6 +370,7 @@ static void network_task(void *arg)
 void app_main(void)
 {
     telemetry_init();
+    inverter_settings_init();
     ESP_ERROR_CHECK(display_init());
     display_set_status(DISPLAY_SEARCHING);
     ESP_ERROR_CHECK(display_start_dashboard());

@@ -14,7 +14,7 @@ function Assert-Condition([bool]$Condition, [string]$Message) {
 }
 
 foreach ($uri in @('/', '/panel', '/panel.css', '/panel.js', '/api/panel', '/api/screen.bmp',
-                   '/wifi', '/wifi.js', '/api/wifi/scan')) {
+                   '/wifi', '/wifi.js', '/api/wifi/scan', '/api/settings')) {
     $code = $null
     try {
         $response = Invoke-WebRequest "$BaseUri$uri" -UseBasicParsing -TimeoutSec 15
@@ -26,7 +26,7 @@ foreach ($uri in @('/', '/panel', '/panel.css', '/panel.js', '/api/panel', '/api
     Assert-Condition ($code -eq 401) "Unprotected dashboard endpoint: $uri ($code)"
 }
 
-foreach ($uri in @('/api/wifi', '/api/wifi/reset')) {
+foreach ($uri in @('/api/wifi', '/api/wifi/reset', '/api/settings')) {
     $code = $null
     try {
         $response = Invoke-WebRequest "$BaseUri$uri" -Method Post -ContentType 'application/json' -Body '{}' -UseBasicParsing -TimeoutSec 15
@@ -43,6 +43,14 @@ $script = Invoke-WebRequest "$BaseUri/panel.js" -Headers $headers -UseBasicParsi
 Assert-Condition (-not $script.Content.Contains('prompt(')) 'Redundant password prompt remains'
 $style = Invoke-WebRequest "$BaseUri/panel.css" -Headers $headers -UseBasicParsing -TimeoutSec 15
 Assert-Condition ([string]$style.Headers['Content-Type'] -match 'text/css') 'Incorrect stylesheet content type'
+$settings = Invoke-RestMethod "$BaseUri/api/settings" -Headers $headers -TimeoutSec 15
+Assert-Condition (@($settings.settings).Count -eq 42) 'Wrong settings catalog size'
+foreach ($setting in $settings.settings) {
+    Assert-Condition ($setting.group -in @('solar', 'grid', 'house', 'battery', 'inverter')) 'Unknown settings group'
+    if ($null -eq $setting.value) {
+        Assert-Condition (-not $setting.editable) "Missing setting is editable: $($setting.id)"
+    }
+}
 
 for ($sample = 0; $sample -lt 5; $sample++) {
     $panel = Invoke-RestMethod "$BaseUri/api/panel" -Headers $headers -TimeoutSec 15

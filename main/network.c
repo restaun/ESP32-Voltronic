@@ -24,6 +24,7 @@
 #include "display.h"
 #include "network.h"
 #include "telemetry.h"
+#include "inverter_settings.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT BIT1
@@ -323,10 +324,63 @@ static cJSON *read_wifi_request(httpd_req_t *req)
     return root;
 }
 
+static esp_err_t inverter_settings_handler(httpd_req_t *req)
+{
+    if (require_authorization(req) != ESP_OK) return ESP_OK;
+    if (req->method == HTTP_POST) {
+        char origin[128];
+        if (httpd_req_get_hdr_value_len(req, "Origin") > 0) {
+            char host[96], expected[128];
+            if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) != ESP_OK ||
+                httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Origen no valido");
+            }
+            snprintf(expected, sizeof(expected), "http://%s", host);
+            if (strcmp(origin, expected) != 0) {
+                ESP_LOGW(TAG, "Rejected cross-origin inverter setting");
+                httpd_resp_set_status(req, "403 Forbidden");
+                return httpd_resp_sendstr(req, "Origen no permitido");
+            }
+        }
+        char content_type[64];
+        if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+            (strcmp(content_type, "application/json") != 0 &&
+             strcmp(content_type, "application/json; charset=utf-8") != 0)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Se requiere application/json");
+        }
+        cJSON *request = read_wifi_request(req);
+        if (request == NULL) return ESP_OK;
+        char error[192];
+        const bool accepted = inverter_settings_submit(request, error, sizeof(error));
+        cJSON_Delete(request);
+        if (!accepted) {
+            ESP_LOGW(TAG, "Inverter setting rejected: %s", error);
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, error);
+        }
+        httpd_resp_set_status(req, "202 Accepted");
+    }
+    cJSON *root = inverter_settings_json();
+    char *json = root == NULL ? NULL : cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "Could not allocate inverter settings JSON");
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memoria insuficiente");
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_type(req, "application/json");
+    const esp_err_t err = httpd_resp_sendstr(req, json);
+    cJSON_free(json);
+    return err;
+}
+
 static esp_err_t wifi_configuration_handler(httpd_req_t *req)
 {
     if (require_authorization(req) != ESP_OK) {
         return ESP_OK;
+    }
+    if (inverter_settings_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Espera a que termine la verificacion del ajuste del Axpert");
     }
     cJSON *root = read_wifi_request(req);
     if (root == NULL) {
@@ -441,6 +495,10 @@ static esp_err_t update_handler(httpd_req_t *req)
     if (require_authorization(req) != ESP_OK) {
         return ESP_OK;
     }
+    if (inverter_settings_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Espera a que termine la verificacion del ajuste del Axpert");
+    }
     if (req->content_len <= 0 || req->content_len > OTA_MAX_SIZE) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Tamano de firmware no valido");
     }
@@ -475,7 +533,7 @@ static esp_err_t telemetry_handler(httpd_req_t *req)
 static httpd_handle_t start_web_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 14;
+    config.max_uri_handlers = 16;
     config.stack_size = 8192;
     config.recv_wait_timeout = 30;
     config.send_wait_timeout = 10;
@@ -501,6 +559,8 @@ static httpd_handle_t start_web_server(void)
     const httpd_uri_t scan_uri = {.uri = "/api/wifi/scan", .method = HTTP_GET, .handler = wifi_scan_handler};
     const httpd_uri_t configure_uri = {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_configuration_handler};
     const httpd_uri_t reset_uri = {.uri = "/api/wifi/reset", .method = HTTP_POST, .handler = wifi_configuration_handler};
+    const httpd_uri_t settings_get_uri = {.uri = "/api/settings", .method = HTTP_GET, .handler = inverter_settings_handler};
+    const httpd_uri_t settings_post_uri = {.uri = "/api/settings", .method = HTTP_POST, .handler = inverter_settings_handler};
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &update_uri));
@@ -515,6 +575,8 @@ static httpd_handle_t start_web_server(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &scan_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &configure_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &reset_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &settings_get_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &settings_post_uri));
     return server;
 }
 
