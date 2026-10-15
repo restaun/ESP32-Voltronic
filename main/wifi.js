@@ -1,6 +1,17 @@
 "use strict";
 const byId = id => document.getElementById(id);
 const result = byId("result");
+for (const [buttonId, fieldId, description] of [
+    ["show-password", "password", "de red"],
+    ["show-web-password", "web-password", "web"]
+]) {
+    byId(buttonId).addEventListener("click", () => {
+        const show = byId(fieldId).type !== "text";
+        byId(fieldId).type = show ? "text" : "password";
+        byId(buttonId).setAttribute("aria-pressed", String(show));
+        byId(buttonId).textContent = `${show ? "Ocultar" : "Mostrar"} contraseña ${description}`;
+    });
+}
 function message(text, error = false) {
     result.textContent = text;
     result.dataset.error = String(error);
@@ -56,6 +67,14 @@ async function save(url, data) {
         message(await response.text());
         byId("password").value = "";
         byId("web-password").value = "";
+        for (const [buttonId, fieldId, description] of [
+            ["show-password", "password", "de red"],
+            ["show-web-password", "web-password", "web"]
+        ]) {
+            byId(fieldId).type = "password";
+            byId(buttonId).setAttribute("aria-pressed", "false");
+            byId(buttonId).textContent = `Mostrar contraseña ${description}`;
+        }
     } catch (error) {
         message("No se confirmó el cambio: " + error.message + ". Comprueba la conexión antes de reintentar.", true);
         byId("save").disabled = false;

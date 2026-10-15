@@ -38,21 +38,32 @@ al inversor. La selección de USB (en vez de CAN) se establece por el CH422G.
 
 ## Wi-Fi, estado y OTA
 
-Desde la version **0.4.0**, si no hay configuracion guardada, la primera
-pantalla es **CONFIGURAR WIFI**, con dos opciones:
+Desde la version **0.4.2**, si no hay configuracion guardada, el ESP32 crea
+automaticamente la red WPA2 **Esp32AxpertVMII** y abre **Configurar Wi-Fi**
+en la pantalla, con el mismo estilo LVGL que el panel. La clave aleatoria
+de 12 caracteres aparece en la LCD; no es fija ni se publica en los registros.
+Se genera una nueva si se reinicia sin guardar configuracion.
 
-- **CONECTAR A UNA WIFI**: busca redes de 2,4 GHz; selecciona tu red y escribe
-  su clave y una clave web/OTA de 8 a 48 caracteres. **MANUAL** permite una
-  red oculta. Una red abierta admite clave vacia; una protegida admite
-  8 a 63 bytes o una PSK hexadecimal de 64 caracteres.
-- **CREAR UNA WIFI**: introduce el nombre de la red propia, una clave WPA2
-  de 8 a 63 bytes y la clave web/OTA. No requiere router ni Internet.
+Para configurarlo desde el movil, conecta a esa red, conserva la conexion
+aunque indique «sin Internet» y abre **http://192.168.4.1/**. Autenticate
+como `admin` con la misma clave que muestra la LCD. Puedes guardar la red
+de casa o una red propia, y cambiar la clave web; si la dejas vacia,
+se conserva la clave inicial. No hace falta tocar la pantalla antes de
+conectar el movil. El servidor sigue disponible mientras el formulario
+inicial esta abierto en la LCD.
 
-La lista permite cambiar de pagina y repetir la busqueda con **BUSCAR**.
-Desde el teclado **VOLVER** regresa a la eleccion del modo.
-El teclado comienza en minúsculas y permite alternar con **MAYUS** / **minus**;
-el botón **123** muestra números y símbolos. Una vez conectada, la pantalla
-muestra la IP local.
+Tambien puedes completar todo en la pantalla:
+
+- **Conectar a una Wi-Fi**: pulsa **Buscar**, elige una red de 2,4 GHz en
+  **Elegir red** o escribe el SSID, incluida una red oculta. Una red abierta
+  admite clave vacia; una protegida admite 8 a 63 bytes o PSK hexadecimal
+  de 64 caracteres.
+- **Crear una Wi-Fi**: introduce el nombre de la red propia y una clave
+  WPA2 de 8 a 63 bytes; no requiere router ni Internet.
+- **Clave web / OTA**: de 8 a 48 bytes; se precarga la clave inicial o la
+  guardada. **Mostrar contrasenas** permite ver u ocultar ambas claves.
+- El teclado LVGL permite minusculas, mayusculas, numeros y simbolos.
+  Toca el campo que quieras editar. **Guardar** aplica los cambios y reinicia.
 
 En modo red propia, conecta el ordenador o telefono a la red que has creado
 y abre **http://192.168.4.1/**. La primera pagina web es la configuracion de
@@ -74,6 +85,19 @@ anteriores; un reinicio vuelve a intentar la red guardada. Mientras la red
 de recuperacion esta activa, el cambio a la red de casa requiere guardar
 su configuracion desde `/wifi` o reiniciar.
 
+Desde la version **0.4.1**, el panel de la pantalla incluye un boton
+**Configurar Wi-Fi** en la parte superior derecha, visible tambien en la
+vista de detalles. Permite cambiar la red, sus claves o el modo sin usar
+el navegador. Los datos guardados se precargan; las claves permanecen
+ocultas salvo que actives **Mostrar contrasenas**. **Guardar** guarda
+y reinicia. **Cancelar**, disponible
+si ya habia configuracion guardada, reinicia sin guardar los cambios.
+Al abrir los ajustes desde el panel se detienen el servidor web y la
+conexion de red; se restauran al reiniciar. Esto no afecta al primer
+arranque sin datos, donde se mantiene la web de configuracion del movil.
+La web tambien permite mostrar u ocultar cada clave por separado.
+El reloj RGB sigue a 20 MHz.
+
 **Restablecer Wi-Fi y acceso web**, en `/wifi`, requiere autenticacion y
 confirmacion. Borra exclusivamente la configuracion de red y acceso web,
 reinicia y vuelve a la pantalla tactil inicial. No borra todo NVS ni cambia
@@ -93,7 +117,7 @@ la IP que muestra la pantalla sigue funcionando.
 
 ## Panel energético en LCD y web
 
-El firmware **0.4.0** incorpora un panel oscuro inspirado en el panel de
+El firmware **0.4.2** incorpora un panel oscuro inspirado en el panel de
 VoltronicSerial, adaptado a la LCD de 1024 x 600 y a navegadores de escritorio
 y móvil. Incluye placas, entrada AC, Axpert, salida a casa, batería y ESP32.
 Todos los valores energéticos proceden del Axpert; no se usan Shelly,
@@ -102,8 +126,8 @@ SmartSolar ni un enlace directo con los BMS.
 - La LCD usa LVGL 8.4, fuentes Montserrat suavizadas, iconos y tarjetas
   redondeadas. Las medidas se actualizan cada segundo. Pulsa una tarjeta
   para ver los detalles y **Volver** para regresar al esquema.
-  La configuración táctil Wi-Fi conserva
-  su teclado y tiene acceso exclusivo al dibujo y al controlador táctil.
+  La configuracion Wi-Fi tambien usa LVGL y tiene acceso exclusivo al
+  dibujo y al controlador tactil.
 - La web consulta cada tres segundos **GET /api/panel** y el estado del ESP32.
   Toca una tarjeta para ver sus medidas. **Datos y OTA** mantiene el
   diagnóstico completo y la actualización de firmware. Se usa el usuario
@@ -233,8 +257,21 @@ otro PID necesitarán ajustar esa identificación.
 ## Prueba en la placa
 
 La version 0.4.0 incorpora configuracion web, seleccion tactil de ambos
-modos y recuperacion por punto de acceso. Su prueba fisica de primer
-arranque, cambio de modo y restablecimiento esta pendiente; las
+modos y recuperacion por punto de acceso. Se cargo por COM5 con hash
+verificado y se borro la particion NVS para probar el primer arranque;
+el registro confirma el inicio de la configuracion tactil. La version
+0.4.1 anade el acceso a ajustes Wi-Fi desde el propio panel de la LCD.
+La 0.4.1 se cargo y arranco conservando la red; el usuario confirmo que el
+boton de la LCD abre los ajustes. La 0.4.2 sustituye el formulario de
+mapa de bits por LVGL e incorpora la red inicial protegida para el movil.
+Se cargo por COM5 con hash verificado y se borro exclusivamente NVS.
+El registro confirma arranque 0.4.2, RGB a 20 MHz y punto de acceso en
+192.168.4.1 sin errores durante la observacion inicial. El usuario confirmo
+que puede abrir la configuracion desde el movil. Las 19 pruebas web pasan;
+el control de mostrar/ocultar tambien se verifico en una vista local de
+375 px de ancho, sin desbordamiento horizontal.
+La prueba fisica de guardado de ambas modalidades y restablecimiento
+con esta version esta pendiente; las
 observaciones siguientes corresponden a versiones anteriores.
 
 La version 0.3.3 se ha cargado por USB-UART con hash verificado. El arranque

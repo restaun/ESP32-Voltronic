@@ -6,6 +6,7 @@
 #include "lvgl.h"
 
 #include "dashboard_lvgl.h"
+#include "network.h"
 
 #define WIDTH 1024
 #define HEIGHT 600
@@ -68,6 +69,12 @@ static void show_home(lv_event_t *event)
     (void)event;
     lv_obj_add_flag(details, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(home, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void configure_wifi(lv_event_t *event)
+{
+    (void)event;
+    network_request_wifi_setup();
 }
 
 static lv_obj_t *card(int x, int y, int width, int height, uint32_t accent,
@@ -166,9 +173,16 @@ esp_err_t dashboard_lvgl_init(dashboard_present_fn present, void *back, void *fr
     lv_obj_set_style_text_color(screen, lv_color_hex(TEXT), 0);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     label(screen, 24, 14, 530, &lv_font_montserrat_28, TEXT, "Panel energetico");
-    age_label = label(screen, 25, 49, 640, &lv_font_montserrat_14, MUTED, "Esperando datos del Axpert");
+    age_label = label(screen, 25, 49, 740, &lv_font_montserrat_14, MUTED, "Esperando datos del Axpert");
     clock_label = label(screen, 710, 20, 290, &lv_font_montserrat_20, TEXT, "");
     lv_obj_set_style_text_align(clock_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_t *wifi_button = lv_btn_create(screen);
+    lv_obj_set_pos(wifi_button, 790, 44);
+    lv_obj_set_size(wifi_button, 210, 32);
+    lv_obj_add_event_cb(wifi_button, configure_wifi, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *wifi_text = label(wifi_button, 0, 0, 190, &lv_font_montserrat_14,
+                                TEXT, LV_SYMBOL_WIFI "  Configurar Wi-Fi");
+    lv_obj_center(wifi_text);
     home = lv_obj_create(screen);
     lv_obj_remove_style_all(home);
     lv_obj_set_size(home, WIDTH, 480);
@@ -330,4 +344,209 @@ void dashboard_lvgl_resume(void *back, void *front)
     touch_down = false;
     lv_disp_draw_buf_init(&draw_buffer, back, front, WIDTH * HEIGHT);
     lv_obj_invalidate(lv_scr_act());
+}
+
+static lv_obj_t *wifi_screen, *previous_screen, *wifi_mode, *wifi_ssid;
+static lv_obj_t *wifi_password, *wifi_web_password, *wifi_keyboard, *wifi_networks;
+static lv_obj_t *wifi_error, *wifi_scan_button;
+static dashboard_wifi_config_t *wifi_config;
+static network_wifi_ap_t wifi_scan_results[NETWORK_SCAN_CAPACITY];
+static size_t wifi_scan_count;
+static bool wifi_finished, wifi_saved;
+
+static void wifi_focus(lv_event_t *event)
+{
+    lv_keyboard_set_textarea(wifi_keyboard, lv_event_get_target(event));
+}
+
+static lv_obj_t *wifi_field(int x, int y, int width, const char *title,
+                            const char *text, uint32_t max_length, bool password)
+{
+    label(wifi_screen, x, y, width, &lv_font_montserrat_20, MUTED, title);
+    lv_obj_t *field = lv_textarea_create(wifi_screen);
+    lv_obj_set_pos(field, x, y + 25);
+    lv_obj_set_size(field, width, 48);
+    lv_obj_set_style_bg_color(field, lv_color_hex(CARD), 0);
+    lv_obj_set_style_text_color(field, lv_color_hex(TEXT), 0);
+    lv_obj_set_style_text_font(field, &lv_font_montserrat_20, 0);
+    lv_textarea_set_one_line(field, true);
+    lv_textarea_set_max_length(field, max_length);
+    lv_textarea_set_password_mode(field, password);
+    lv_textarea_set_text(field, text);
+    lv_obj_add_event_cb(field, wifi_focus, LV_EVENT_CLICKED, NULL);
+    return field;
+}
+
+static lv_obj_t *wifi_button(int x, int y, int width, const char *text,
+                             lv_event_cb_t callback)
+{
+    lv_obj_t *button = lv_btn_create(wifi_screen);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_size(button, width, 44);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *caption = label(button, 0, 0, width - 10, &lv_font_montserrat_20, TEXT, text);
+    lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(caption);
+    return button;
+}
+
+static void wifi_show_passwords(lv_event_t *event)
+{
+    const bool show = lv_obj_has_state(lv_event_get_target(event), LV_STATE_CHECKED);
+    lv_textarea_set_password_mode(wifi_password, !show);
+    lv_textarea_set_password_mode(wifi_web_password, !show);
+}
+
+static void wifi_change_mode(lv_event_t *event)
+{
+    (void)event;
+    const bool ap = lv_dropdown_get_selected(wifi_mode) == 1;
+    if (ap) {
+        lv_obj_add_state(wifi_scan_button, LV_STATE_DISABLED);
+        lv_obj_add_state(wifi_networks, LV_STATE_DISABLED);
+    } else {
+        lv_obj_clear_state(wifi_scan_button, LV_STATE_DISABLED);
+        lv_obj_clear_state(wifi_networks, LV_STATE_DISABLED);
+    }
+    lv_label_set_text(wifi_error, ap ? "Red propia: clave de 8 a 63 bytes." :
+                                       "Red de casa: clave de 8 a 63 bytes, o vacia si es abierta.");
+}
+
+static void wifi_select_network(lv_event_t *event)
+{
+    (void)event;
+    const uint16_t selected = lv_dropdown_get_selected(wifi_networks);
+    if (selected > 0 && selected <= wifi_scan_count) {
+        const char *ssid = wifi_scan_results[selected - 1].ssid;
+        if (strcmp(ssid, lv_textarea_get_text(wifi_ssid)) != 0) {
+            lv_textarea_set_text(wifi_password, "");
+        }
+        lv_textarea_set_text(wifi_ssid, ssid);
+        lv_keyboard_set_textarea(wifi_keyboard, wifi_password);
+    }
+}
+
+static void wifi_scan(lv_event_t *event)
+{
+    (void)event;
+    const esp_err_t err = network_scan_wifi(wifi_scan_results, NETWORK_SCAN_CAPACITY, &wifi_scan_count);
+    lv_dropdown_set_options(wifi_networks, "Elegir red");
+    if (err != ESP_OK) {
+        lv_label_set_text(wifi_error, "Error al buscar redes. Pulsa Buscar para reintentar.");
+        return;
+    }
+    for (size_t index = 0; index < wifi_scan_count; ++index) {
+        char option[33];
+        strlcpy(option, wifi_scan_results[index].ssid, sizeof(option));
+        for (char *c = option; *c; ++c) {
+            if (*c == '\n' || *c == '\r') {
+                *c = ' ';
+            }
+        }
+        lv_dropdown_add_option(wifi_networks, option, LV_DROPDOWN_POS_LAST);
+    }
+    lv_label_set_text(wifi_error, wifi_scan_count ? "Selecciona una red en Elegir red." :
+                                                                  "Sin redes. Puedes escribir un SSID oculto.");
+}
+
+static void wifi_save(lv_event_t *event)
+{
+    (void)event;
+    const char *ssid = lv_textarea_get_text(wifi_ssid);
+    const char *password = lv_textarea_get_text(wifi_password);
+    const char *web_password = lv_textarea_get_text(wifi_web_password);
+    const bool ap = lv_dropdown_get_selected(wifi_mode) == 1;
+    if (strlen(ssid) == 0 || strlen(ssid) >= sizeof(wifi_config->ssid) ||
+        !network_valid_wifi_password(password, ap) ||
+        strlen(web_password) < 8 || strlen(web_password) >= sizeof(wifi_config->web_password)) {
+        ESP_LOGW("dashboard", "Invalid LCD Wi-Fi configuration");
+        lv_label_set_text(wifi_error, "Revisa SSID (1-32 bytes), clave de red y clave web (8-48 bytes).");
+        return;
+    }
+    strlcpy(wifi_config->ssid, ssid, sizeof(wifi_config->ssid));
+    strlcpy(wifi_config->wifi_password, password, sizeof(wifi_config->wifi_password));
+    strlcpy(wifi_config->web_password, web_password, sizeof(wifi_config->web_password));
+    wifi_config->create_network = ap;
+    wifi_saved = true;
+    wifi_finished = true;
+}
+
+static void wifi_cancel(lv_event_t *event)
+{
+    (void)event;
+    wifi_finished = true;
+}
+
+void dashboard_lvgl_wifi_begin(dashboard_wifi_config_t *config, bool allow_cancel,
+                               const char *mobile_instructions)
+{
+    wifi_config = config;
+    wifi_finished = false;
+    wifi_saved = false;
+    wifi_scan_count = 0;
+    previous_screen = lv_scr_act();
+    wifi_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(wifi_screen, lv_color_hex(BG), 0);
+    lv_obj_set_style_text_color(wifi_screen, lv_color_hex(TEXT), 0);
+    lv_obj_clear_flag(wifi_screen, LV_OBJ_FLAG_SCROLLABLE);
+    label(wifi_screen, 24, 14, 700, &lv_font_montserrat_28, TEXT, LV_SYMBOL_WIFI "  Configurar Wi-Fi");
+    label(wifi_screen, 24, 55, 970, &lv_font_montserrat_14, MUTED,
+          "Conectar a la red de casa o crear una red propia. Los cambios solo se aplican al guardar.");
+    wifi_mode = lv_dropdown_create(wifi_screen);
+    lv_obj_set_pos(wifi_mode, 24, 95);
+    lv_obj_set_size(wifi_mode, 310, 44);
+    lv_dropdown_set_options(wifi_mode, "Conectar a una Wi-Fi\nCrear una Wi-Fi");
+    lv_obj_set_style_text_font(wifi_mode, &lv_font_montserrat_20, 0);
+    lv_dropdown_set_selected(wifi_mode, config->create_network ? 1 : 0);
+    lv_obj_add_event_cb(wifi_mode, wifi_change_mode, LV_EVENT_VALUE_CHANGED, NULL);
+    wifi_scan_button = wifi_button(350, 95, 110, "Buscar", wifi_scan);
+    wifi_networks = lv_dropdown_create(wifi_screen);
+    lv_obj_set_pos(wifi_networks, 475, 95);
+    lv_obj_set_size(wifi_networks, 135, 44);
+    lv_dropdown_set_options(wifi_networks, "Elegir red");
+    lv_obj_add_event_cb(wifi_networks, wifi_select_network, LV_EVENT_VALUE_CHANGED, NULL);
+    wifi_ssid = wifi_field(24, 153, 586, "Nombre de red (SSID)", config->ssid, 32, false);
+    wifi_password = wifi_field(24, 237, 280, "Clave de la red", config->wifi_password, 64, true);
+    wifi_web_password = wifi_field(330, 237, 280, "Clave web / OTA", config->web_password, 48, true);
+    lv_obj_t *show = lv_checkbox_create(wifi_screen);
+    lv_obj_set_pos(show, 24, 320);
+    lv_checkbox_set_text(show, "Mostrar contrasenas");
+    lv_obj_set_style_text_font(show, &lv_font_montserrat_20, 0);
+    lv_obj_add_event_cb(show, wifi_show_passwords, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t *instructions = label(wifi_screen, 640, 95, 360, &lv_font_montserrat_20, BATTERY,
+          mobile_instructions[0] ? mobile_instructions :
+          "Guardar aplica los cambios y reinicia.\n\nCancelar vuelve al panel sin guardar, mediante un reinicio.");
+    lv_label_set_long_mode(instructions, LV_LABEL_LONG_WRAP);
+    wifi_button(640, 280, 170, "Guardar", wifi_save);
+    if (allow_cancel) {
+        wifi_button(830, 280, 170, "Cancelar", wifi_cancel);
+    }
+    wifi_error = label(wifi_screen, 24, 350, 970, &lv_font_montserrat_14, SOLAR, "");
+    wifi_keyboard = lv_keyboard_create(wifi_screen);
+    lv_obj_set_size(wifi_keyboard, 1000, 220);
+    lv_obj_align(wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_set_style_bg_color(wifi_keyboard, lv_color_hex(CARD), 0);
+    lv_obj_set_style_bg_color(wifi_keyboard, lv_color_hex(0x1e3648), LV_PART_ITEMS);
+    lv_obj_set_style_text_color(wifi_keyboard, lv_color_hex(TEXT), LV_PART_ITEMS);
+    lv_obj_set_style_text_font(wifi_keyboard, &lv_font_montserrat_20, LV_PART_ITEMS);
+    lv_keyboard_set_mode(wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_textarea(wifi_keyboard, wifi_ssid);
+    wifi_change_mode(NULL);
+    lv_scr_load(wifi_screen);
+    touch_down = false;
+}
+
+bool dashboard_lvgl_wifi_finished(bool *saved)
+{
+    *saved = wifi_saved;
+    return wifi_finished;
+}
+
+void dashboard_lvgl_wifi_end(void)
+{
+    lv_keyboard_set_textarea(wifi_keyboard, NULL);
+    lv_scr_load(previous_screen);
+    lv_obj_del(wifi_screen);
+    wifi_config = NULL;
+    touch_down = false;
 }

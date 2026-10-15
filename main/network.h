@@ -16,5 +16,6 @@ typedef struct {
 
 esp_err_t network_scan_wifi(network_wifi_ap_t *networks, size_t capacity, size_t *count);
 bool network_valid_wifi_password(const char *password, bool create_network);
+void network_request_wifi_setup(void);
 void network_start(void);
 void network_set_axpert_status(bool hid_found, bool connected);

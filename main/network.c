@@ -10,6 +10,7 @@
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "esp_wifi.h"
 #include "mbedtls/base64.h"
 #include "mdns.h"
@@ -49,6 +50,7 @@ static volatile bool axpert_connected;
 static bool wifi_initialized;
 static bool wifi_started;
 static volatile bool wifi_connection_requested;
+static TaskHandle_t network_task_handle;
 
 extern const char panel_html_start[] asm("_binary_panel_html_start");
 extern const char panel_html_end[] asm("_binary_panel_html_end");
@@ -744,6 +746,42 @@ void network_set_axpert_status(bool hid_found, bool connected)
     axpert_connected = connected;
 }
 
+void network_request_wifi_setup(void)
+{
+    if (network_task_handle == NULL) {
+        ESP_LOGE(TAG, "Cannot open Wi-Fi setup: network task is not ready");
+        display_show_message("ERROR WIFI", "CONFIGURACION NO DISPONIBLE");
+        return;
+    }
+    xTaskNotifyGive(network_task_handle);
+}
+
+static void reconfigure_from_screen(void)
+{
+    ESP_LOGI(TAG, "Opening Wi-Fi settings from LCD; existing settings retained until save");
+    ESP_ERROR_CHECK(httpd_stop(web_server));
+    web_server = NULL;
+    wifi_connection_requested = false;
+    ESP_ERROR_CHECK(esp_wifi_stop());
+    wifi_started = false;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    access_point_active = false;
+
+    char ssid[WIFI_SSID_MAX + 1] = {0};
+    char wifi_pass[WIFI_PASS_MAX + 1] = {0};
+    char ota_pass[WEB_PASS_MAX + 1] = {0};
+    bool create_network = false;
+    const bool configured = load_configuration(ssid, wifi_pass, ota_pass, &create_network);
+    if (display_configure_wifi(ssid, sizeof(ssid), wifi_pass, sizeof(wifi_pass),
+                                ota_pass, sizeof(ota_pass), &create_network, configured, "")) {
+        ESP_ERROR_CHECK(save_configuration(ssid, wifi_pass, ota_pass, create_network));
+        ESP_LOGI(TAG, "Wi-Fi settings saved from LCD; restarting");
+    } else {
+        ESP_LOGI(TAG, "LCD Wi-Fi setup closed without saving; restarting with stored settings");
+    }
+    esp_restart();
+}
+
 void network_start(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -758,14 +796,37 @@ void network_start(void)
     char ota_pass[WEB_PASS_MAX + 1] = {0};
     bool create_network = false;
     if (!load_configuration(ssid, wifi_pass, ota_pass, &create_network)) {
-        ESP_LOGI(TAG, "Starting on-screen Wi-Fi and OTA password setup");
-        if (!display_configure_wifi(ssid, sizeof(ssid), wifi_pass, sizeof(wifi_pass),
-                                    ota_pass, sizeof(ota_pass), &create_network)) {
-            ESP_LOGE(TAG, "Touch-screen Wi-Fi setup failed");
-            display_show_message("ERROR TACTIL", "REVISA PANTALLA");
+        ESP_LOGI(TAG, "No saved network: starting protected setup AP and LVGL configuration");
+        initialize_wifi();
+        ESP_ERROR_CHECK(esp_wifi_start());
+        wifi_started = true;
+        static const char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+        for (size_t index = 0; index < 12; ++index) {
+            ota_pass[index] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+        }
+        ota_pass[12] = '\0';
+        strlcpy(web_password, ota_pass, sizeof(web_password));
+        start_access_point("Esp32AxpertVMII", web_password);
+        web_server = start_web_server();
+        if (web_server == NULL) {
+            display_show_message("ERROR WEB", "SERVIDOR NO INICIA");
             return;
         }
+        char instructions[224];
+        snprintf(instructions, sizeof(instructions),
+                 "DESDE EL MOVIL\nRed: Esp32AxpertVMII\nClave: %s\nhttp://192.168.4.1/\nUsuario: admin\nClave web: la misma",
+                 web_password);
+        if (!display_configure_wifi(ssid, sizeof(ssid), wifi_pass, sizeof(wifi_pass),
+                                    ota_pass, sizeof(ota_pass), &create_network, false, instructions)) {
+            ESP_LOGE(TAG, "Touch-screen Wi-Fi setup failed");
+            display_show_message("ERROR TACTIL", "USA LA WEB DE CONFIGURACION");
+            return;
+        }
+        ESP_ERROR_CHECK(httpd_stop(web_server));
         ESP_ERROR_CHECK(save_configuration(ssid, wifi_pass, ota_pass, create_network));
+        ESP_LOGI(TAG, "Initial Wi-Fi settings saved from LCD; restarting");
+        esp_restart();
+        return;
     }
 
     strlcpy(web_password, ota_pass, sizeof(web_password));
@@ -796,9 +857,12 @@ void network_start(void)
     if (!access_point_active) {
         display_show_network(ip4addr_ntoa((const ip4_addr_t *)&ip_info.ip));
     }
+    network_task_handle = xTaskGetCurrentTaskHandle();
     unsigned int disconnected_seconds = 0;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)) > 0) {
+            reconfigure_from_screen();
+        }
         if (!access_point_active) {
             if (xEventGroupGetBits(wifi_event_group) & WIFI_CONNECTED_BIT) {
                 disconnected_seconds = 0;

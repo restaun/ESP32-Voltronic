@@ -10,6 +10,8 @@ async function fixture({confirmReset = true, failSave = false, failScan = false,
     const elements = new Map();
     function element() {
         return {value:"", textContent:"", dataset:{}, children:[], disabled:false, hidden:false,
+            attributes:{}, type:"password",
+            setAttribute(name, value) { this.attributes[name] = value; },
             addEventListener(name, callback) { this[name] = callback; },
             append(item) { this.children.push(item); },
             replaceChildren(...items) { this.children = items; },
@@ -90,6 +92,23 @@ test("AP password and new web password are submitted then cleared", async () => 
     assert.equal(body.web_password, "new-web-pass");
     assert.equal(elements.get("password").value, "");
     assert.equal(elements.get("web-password").value, "");
+});
+test("password reveal controls toggle each field independently and hide again after saving", async () => {
+    const {elements} = await fixture();
+    fill(elements, "ap", "test-pass");
+    elements.get("web-password").value = "test-web-pass";
+    elements.get("show-password").click();
+    assert.equal(elements.get("password").type, "text");
+    assert.equal(elements.get("web-password").type, "password");
+    assert.equal(elements.get("show-password").attributes["aria-pressed"], "true");
+    elements.get("show-password").click();
+    assert.equal(elements.get("password").type, "password");
+    elements.get("show-web-password").click();
+    assert.equal(elements.get("web-password").type, "text");
+    await submit(elements);
+    assert.equal(elements.get("password").type, "password");
+    assert.equal(elements.get("web-password").type, "password");
+    assert.equal(elements.get("show-web-password").attributes["aria-pressed"], "false");
 });
 test("rejects invalid password lengths and oversized UTF-8 SSIDs", async () => {
     for (const [mode, password, ssid] of [

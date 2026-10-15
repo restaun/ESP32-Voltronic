@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_err.h"
+#include "esp_check.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
@@ -40,182 +41,12 @@ static uint16_t *framebuffer;
 static void *lcd_framebuffers[2];
 static unsigned int drawing_buffer_index = 1;
 static SemaphoreHandle_t frame_complete;
-static volatile bool wifi_setup_active;
 static char shown_ip[16];
 static display_status_t current_status = DISPLAY_SEARCHING;
 static SemaphoreHandle_t render_mutex;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static char network_notice[83];
 static esp_err_t read_touch_press(bool *was_down, uint16_t *x, uint16_t *y, bool *pressed);
-
-static const uint8_t digit_5x7[10][5] = {
-    {0x3e, 0x51, 0x49, 0x45, 0x3e}, {0x00, 0x42, 0x7f, 0x40, 0x00},
-    {0x42, 0x61, 0x51, 0x49, 0x46}, {0x21, 0x41, 0x45, 0x4b, 0x31},
-    {0x18, 0x14, 0x12, 0x7f, 0x10}, {0x27, 0x45, 0x45, 0x45, 0x39},
-    {0x3c, 0x4a, 0x49, 0x49, 0x30}, {0x01, 0x71, 0x09, 0x05, 0x03},
-    {0x36, 0x49, 0x49, 0x49, 0x36}, {0x06, 0x49, 0x49, 0x29, 0x1e},
-};
-
-static const uint8_t font_5x7[26][5] = {
-    {0x7e, 0x11, 0x11, 0x11, 0x7e}, {0x7f, 0x49, 0x49, 0x49, 0x36},
-    {0x3e, 0x41, 0x41, 0x41, 0x22}, {0x7f, 0x41, 0x41, 0x22, 0x1c},
-    {0x7f, 0x49, 0x49, 0x49, 0x41}, {0x7f, 0x09, 0x09, 0x09, 0x01},
-    {0x3e, 0x41, 0x49, 0x49, 0x7a}, {0x7f, 0x08, 0x08, 0x08, 0x7f},
-    {0x00, 0x41, 0x7f, 0x41, 0x00}, {0x20, 0x40, 0x41, 0x3f, 0x01},
-    {0x7f, 0x08, 0x14, 0x22, 0x41}, {0x7f, 0x40, 0x40, 0x40, 0x40},
-    {0x7f, 0x02, 0x0c, 0x02, 0x7f}, {0x7f, 0x04, 0x08, 0x10, 0x7f},
-    {0x3e, 0x41, 0x41, 0x41, 0x3e}, {0x7f, 0x09, 0x09, 0x09, 0x06},
-    {0x3e, 0x41, 0x51, 0x21, 0x5e}, {0x7f, 0x09, 0x19, 0x29, 0x46},
-    {0x46, 0x49, 0x49, 0x49, 0x31}, {0x01, 0x01, 0x7f, 0x01, 0x01},
-    {0x3f, 0x40, 0x40, 0x40, 0x3f}, {0x1f, 0x20, 0x40, 0x20, 0x1f},
-    {0x3f, 0x40, 0x38, 0x40, 0x3f}, {0x63, 0x14, 0x08, 0x14, 0x63},
-    {0x07, 0x08, 0x70, 0x08, 0x07}, {0x61, 0x51, 0x49, 0x45, 0x43},
-};
-
-static const uint8_t lowercase_5x7[26][5] = {
-    {0x20, 0x54, 0x54, 0x54, 0x78}, {0x7f, 0x48, 0x44, 0x44, 0x38},
-    {0x38, 0x44, 0x44, 0x44, 0x20}, {0x38, 0x44, 0x44, 0x48, 0x7f},
-    {0x38, 0x54, 0x54, 0x54, 0x18}, {0x08, 0x7e, 0x09, 0x01, 0x02},
-    {0x0c, 0x52, 0x52, 0x52, 0x3e}, {0x7f, 0x08, 0x04, 0x04, 0x78},
-    {0x00, 0x44, 0x7d, 0x40, 0x00}, {0x20, 0x40, 0x44, 0x3d, 0x00},
-    {0x7f, 0x10, 0x28, 0x44, 0x00}, {0x00, 0x41, 0x7f, 0x40, 0x00},
-    {0x7c, 0x04, 0x18, 0x04, 0x78}, {0x7c, 0x08, 0x04, 0x04, 0x78},
-    {0x38, 0x44, 0x44, 0x44, 0x38}, {0x7c, 0x14, 0x14, 0x14, 0x08},
-    {0x08, 0x14, 0x14, 0x18, 0x7c}, {0x7c, 0x08, 0x04, 0x04, 0x08},
-    {0x48, 0x54, 0x54, 0x54, 0x20}, {0x04, 0x3f, 0x44, 0x40, 0x20},
-    {0x3c, 0x40, 0x40, 0x20, 0x7c}, {0x1c, 0x20, 0x40, 0x20, 0x1c},
-    {0x3c, 0x40, 0x30, 0x40, 0x3c}, {0x44, 0x28, 0x10, 0x28, 0x44},
-    {0x0c, 0x50, 0x50, 0x50, 0x3c}, {0x44, 0x64, 0x54, 0x4c, 0x44},
-};
-
-static const char *const keyboard_upper[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
-static const char *const keyboard_lower[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
-static const char *const keyboard_symbols[] = {"1234567890", "@#$%&-+()", "!_.,/?:"};
-static const int keyboard_row_y[] = {278, 348, 418};
-
-static uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue)
-{
-    return (uint16_t)(((red & 0xf8) << 8) | ((green & 0xfc) << 3) | (blue >> 3));
-}
-
-static void draw_char(char character, int x, int y, int scale, uint16_t color)
-{
-    static const uint8_t percent_5x7[5] = {0x23, 0x13, 0x08, 0x64, 0x62};
-    const uint8_t *glyph = NULL;
-    if (character == '%') {
-        glyph = percent_5x7;
-    } else if (character >= 'a' && character <= 'z') {
-        glyph = lowercase_5x7[character - 'a'];
-    } else if (character >= 'A' && character <= 'Z') {
-        glyph = font_5x7[character - 'A'];
-    } else if (character >= '0' && character <= '9') {
-        glyph = digit_5x7[character - '0'];
-    }
-
-    for (int column = 0; column < 5; ++column) {
-        for (int row = 0; row < 7; ++row) {
-            bool set = glyph != NULL && (glyph[column] & (1u << row)) != 0;
-            if (character == '-' && row == 3 && column > 0 && column < 4) {
-                set = true;
-            } else if (character == '_' && row == 6 && column < 5) {
-                set = true;
-            } else if (character == '.' && row == 6 && column == 2) {
-                set = true;
-            } else if (character == ':' && column == 2 && (row == 2 || row == 5)) {
-                set = true;
-            } else if (character == '*' && ((column == 2 && row == 2) ||
-                                           (column == 1 && row == 3) ||
-                                           (column == 3 && row == 3) ||
-                                           (column == 2 && row == 4))) {
-                set = true;
-            } else if (character == '!' && column == 2 && (row < 5 || row == 6)) {
-                set = true;
-            } else if (character == '@' && ((row == 0 && column > 0 && column < 4) ||
-                                            (row == 1 && (column == 0 || column == 4)) ||
-                                            (row == 2 && column > 0 && column < 4) ||
-                                            (row == 3 && (column == 2 || column == 4)) ||
-                                            (row == 4 && column > 0 && column < 4) ||
-                                            (row == 5 && column == 0))) {
-                set = true;
-            } else if (character == '#' && ((column == 1 || column == 3) ||
-                                            (row == 2 || row == 4))) {
-                set = true;
-            } else if (character == '$' && ((column == 2) ||
-                                            (row == 0 && column > 0 && column < 4) ||
-                                            (row == 3 && column > 0 && column < 4) ||
-                                            (row == 6 && column > 0 && column < 4) ||
-                                            (row == 1 && column == 1) ||
-                                            (row == 5 && column == 3))) {
-                set = true;
-            } else if (character == '&' && ((row == 0 && column == 2) ||
-                                            (row == 1 && (column == 1 || column == 3)) ||
-                                            (row == 2 && column == 2) ||
-                                            (row == 3 && (column == 1 || column == 3)) ||
-                                            (row > 3 && column == 1) ||
-                                            (row > 3 && column == 3))) {
-                set = true;
-            } else if (character == '+' && ((row == 3 && column > 0 && column < 4) ||
-                                            (column == 2 && row > 1 && row < 5))) {
-                set = true;
-            } else if (character == '(' && ((column == 3 && (row == 0 || row == 6)) ||
-                                            (column == 2 && (row == 1 || row == 5)) ||
-                                            (column == 1 && row > 1 && row < 5))) {
-                set = true;
-            } else if (character == ')' && ((column == 1 && (row == 0 || row == 6)) ||
-                                            (column == 2 && (row == 1 || row == 5)) ||
-                                            (column == 3 && row > 1 && row < 5))) {
-                set = true;
-            } else if (character == ',' && ((row == 5 && column == 3) ||
-                                            (row == 6 && column == 2))) {
-                set = true;
-            } else if (character == '/' && column == 4 - (row * 4 / 7)) {
-                set = true;
-            } else if (character == '?' && ((row == 0 && column > 0 && column < 4) ||
-                                            (row == 1 && (column == 0 || column == 4)) ||
-                                            (row == 2 && column == 3) ||
-                                            (row == 3 && column == 2) ||
-                                            (row == 5 && column == 2))) {
-                set = true;
-            }
-            if (!set) {
-                continue;
-            }
-            for (int dy = 0; dy < scale; ++dy) {
-                for (int dx = 0; dx < scale; ++dx) {
-                    const int px = x + column * scale + dx;
-                    const int py = y + row * scale + dy;
-                    if (px >= 0 && px < LCD_H_RES && py >= 0 && py < LCD_V_RES) {
-                        framebuffer[py * LCD_H_RES + px] = color;
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void draw_text_at(const char *text, int x, int y, int scale, uint16_t color)
-{
-    for (const char *character = text; *character != '\0'; ++character, x += 6 * scale) {
-        draw_char(*character, x, y, scale, color);
-    }
-}
-
-static void draw_text(const char *text, int y, int scale, uint16_t color)
-{
-    const int text_width = (int)strlen(text) * 6 * scale - scale;
-    draw_text_at(text, (LCD_H_RES - text_width) / 2, y, scale, color);
-}
-
-static void draw_filled_rect(int x, int y, int width, int height, uint16_t color)
-{
-    for (int py = y; py < y + height && py < LCD_V_RES; ++py) {
-        for (int px = x; px < x + width && px < LCD_H_RES; ++px) {
-            if (px >= 0 && py >= 0) {
-                framebuffer[py * LCD_H_RES + px] = color;
-            }
-        }
-    }
-}
 
 static bool IRAM_ATTR frame_complete_callback(esp_lcd_panel_handle_t lcd,
                                              const esp_lcd_rgb_panel_event_data_t *event,
@@ -242,13 +73,6 @@ static void flush_framebuffer(void)
     }
     drawing_buffer_index ^= 1u;
     framebuffer = lcd_framebuffers[drawing_buffer_index];
-}
-
-static void fill_background(uint16_t color)
-{
-    for (size_t i = 0; i < LCD_H_RES * LCD_V_RES; ++i) {
-        framebuffer[i] = color;
-    }
 }
 
 static esp_err_t init_ch422g(void)
@@ -441,10 +265,6 @@ static void present_dashboard(const void *pixels)
 static void dashboard_task(void *arg)
 {
     (void)arg;
-    xSemaphoreTake(render_mutex, portMAX_DELAY);
-    ESP_ERROR_CHECK(dashboard_lvgl_init(present_dashboard, framebuffer,
-                                        lcd_framebuffers[drawing_buffer_index ^ 1u]));
-    xSemaphoreGive(render_mutex);
     bool suspended = false;
     int64_t next_render = 0;
     int64_t last_tick = esp_timer_get_time() / 1000;
@@ -484,6 +304,8 @@ static void dashboard_task(void *arg)
 
 esp_err_t display_start_dashboard(void)
 {
+    ESP_RETURN_ON_ERROR(dashboard_lvgl_init(present_dashboard, framebuffer,
+                        lcd_framebuffers[drawing_buffer_index ^ 1u]), TAG, "LVGL initialization failed");
     if (xTaskCreate(dashboard_task, "dashboard", 8192, NULL, 2, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Could not create LCD dashboard task");
         return ESP_ERR_NO_MEM;
@@ -522,63 +344,6 @@ void display_end_update(void)
     ESP_LOGI(TAG, "LCD rendering resumed after OTA failure");
 }
 
-static void draw_wifi_setup(const char *ssid, const char *wifi_password,
-                            const char *web_password, unsigned int selected_field,
-                            bool lower_case, bool symbols, bool create_network)
-{
-    const uint16_t background = rgb565(8, 16, 32);
-    const uint16_t foreground = rgb565(240, 245, 255);
-    const uint16_t button = rgb565(30, 54, 72);
-    const uint16_t selected = rgb565(0, 76, 88);
-    fill_background(background);
-    draw_text_at(create_network ? "CREAR WIFI" : "CONECTAR WIFI", 28, 20, 5, foreground);
-    draw_filled_rect(770, 10, 230, 50, button);
-    draw_text_at("VOLVER", 795, 25, 3, foreground);
-
-    const char *values[] = {ssid, wifi_password, web_password};
-    const char *labels[] = {"RED WIFI", "CLAVE WIFI", "CLAVE OTA"};
-    for (unsigned int field = 0; field < 3; ++field) {
-        const int y = 75 + (int)field * 58;
-        draw_filled_rect(22, y, 980, 48, field == selected_field ? selected : button);
-        draw_text_at(labels[field], 35, y + 12, 3, foreground);
-        char visible[65] = {0};
-        if (field == 0) {
-            strlcpy(visible, values[field], sizeof(visible));
-        } else {
-            const size_t length = strlen(values[field]);
-            memset(visible, '*', length < sizeof(visible) - 1 ? length : sizeof(visible) - 1);
-        }
-        draw_text_at(visible, 290, y + 12, 3, foreground);
-    }
-
-    const char *const *rows = symbols ? keyboard_symbols : (lower_case ? keyboard_lower : keyboard_upper);
-    for (int row = 0; row < 3; ++row) {
-        const char *keys = rows[row];
-        const size_t key_count = strlen(keys);
-        const int key_width = 88;
-        const int gap = 10;
-        const int total_width = (int)key_count * (key_width + gap) - gap;
-        const int start_x = (LCD_H_RES - total_width) / 2;
-        for (size_t index = 0; index < key_count; ++index) {
-            const int x = start_x + (int)index * (key_width + gap);
-            draw_filled_rect(x, keyboard_row_y[row], key_width, 58, button);
-            char label[2] = {keys[index], '\0'};
-            draw_text_at(label, x + 35, keyboard_row_y[row] + 18, 3, foreground);
-        }
-    }
-    draw_filled_rect(55, 500, 170, 65, button);
-    draw_text_at(symbols ? "ABC" : "123", 98, 521, 3, foreground);
-    draw_filled_rect(245, 500, 180, 65, button);
-    draw_text_at(lower_case ? "MAYUS" : "minus", 285, 521, 3, foreground);
-    draw_filled_rect(445, 500, 180, 65, button);
-    draw_text_at("SPACE", 487, 521, 3, foreground);
-    draw_filled_rect(645, 500, 150, 65, button);
-    draw_text_at("DELETE", 670, 521, 3, foreground);
-    draw_filled_rect(815, 500, 155, 65, rgb565(0, 92, 44));
-    draw_text_at("SAVE", 856, 521, 3, foreground);
-    flush_framebuffer();
-}
-
 static esp_err_t read_touch_press(bool *was_down, uint16_t *x, uint16_t *y, bool *pressed)
 {
     *pressed = false;
@@ -596,255 +361,56 @@ static esp_err_t read_touch_press(bool *was_down, uint16_t *x, uint16_t *y, bool
     }
     if (points == 0) {
         *was_down = false;
-    } else if (!*was_down) {
+    } else {
+        *pressed = !*was_down;
         *was_down = true;
         *x = point.x;
         *y = point.y;
-        *pressed = true;
     }
     return ESP_OK;
-}
-
-static void draw_wifi_networks(const network_wifi_ap_t *networks, size_t count,
-                              size_t page, esp_err_t scan_error)
-{
-    const uint16_t foreground = rgb565(240, 245, 255);
-    const uint16_t button = rgb565(30, 54, 72);
-    fill_background(rgb565(8, 16, 32));
-    draw_text_at("SELECCIONA RED WIFI", 28, 20, 5, foreground);
-    if (scan_error != ESP_OK) {
-        draw_text("ERROR AL BUSCAR REDES", 200, 5, foreground);
-        draw_text("PULSA BUSCAR PARA REINTENTAR", 260, 4, foreground);
-    } else if (count == 0) {
-        draw_text("SIN REDES WIFI DE 2.4 GHZ", 210, 5, foreground);
-        draw_text("BUSCAR O INTRODUCIR RED MANUAL", 270, 4, foreground);
-    }
-    for (size_t row = 0; row < 6 && page * 6 + row < count; ++row) {
-        const network_wifi_ap_t *entry = &networks[page * 6 + row];
-        const int y = 85 + (int)row * 60;
-        draw_filled_rect(22, y, 980, 50, button);
-        draw_text_at(entry->ssid, 35, y + 15, 3, foreground);
-        char detail[24];
-        snprintf(detail, sizeof(detail), "%s %d", entry->secured ? "CLAVE" : "LIBRE", entry->rssi);
-        draw_text_at(detail, 790, y + 15, 3, foreground);
-    }
-    char page_label[40];
-    snprintf(page_label, sizeof(page_label), "PAGINA %u DE %u",
-             (unsigned int)page + 1, (unsigned int)(count == 0 ? 1 : (count + 5) / 6));
-    draw_text(page_label, 455, 3, foreground);
-    const char *labels[] = {"ANTERIOR", "SIGUIENTE", "BUSCAR", "MANUAL"};
-    for (int index = 0; index < 4; ++index) {
-        const int x = 22 + index * 250;
-        draw_filled_rect(x, 500, 230, 65, button);
-        draw_text_at(labels[index], x + 20, 521, 3, foreground);
-    }
-    flush_framebuffer();
-}
-
-static bool select_wifi_network(char *ssid, size_t capacity, bool *selected)
-{
-    network_wifi_ap_t networks[NETWORK_SCAN_CAPACITY];
-    size_t count = 0;
-    size_t page = 0;
-    bool was_down = true;
-    *selected = false;
-    esp_err_t scan_error;
-
-scan:
-    fill_background(rgb565(8, 16, 32));
-    draw_text("BUSCANDO REDES WIFI", 230, 6, rgb565(240, 245, 255));
-    flush_framebuffer();
-    scan_error = network_scan_wifi(networks, NETWORK_SCAN_CAPACITY, &count);
-    page = 0;
-    draw_wifi_networks(networks, count, page, scan_error);
-    while (true) {
-        uint16_t x = 0;
-        uint16_t y = 0;
-        bool pressed = false;
-        if (read_touch_press(&was_down, &x, &y, &pressed) != ESP_OK) {
-            return false;
-        }
-        if (pressed) {
-            if (x >= 22 && x < 1002 && y >= 85 && y < 445 &&
-                (y - 85) % 60 < 50 && scan_error == ESP_OK) {
-                const size_t index = page * 6 + (y - 85) / 60;
-                if (index < count) {
-                    strlcpy(ssid, networks[index].ssid, capacity);
-                    *selected = true;
-                    return true;
-                }
-            } else if (x >= 22 && x < 1002 && y >= 500 && y < 565 &&
-                       (x - 22) % 250 < 230) {
-                const unsigned int button = (x - 22) / 250;
-                if (button == 0 && page > 0) {
-                    --page;
-                } else if (button == 1 && (page + 1) * 6 < count) {
-                    ++page;
-                } else if (button == 2) {
-                    goto scan;
-                } else if (button == 3) {
-                    return true;
-                }
-                draw_wifi_networks(networks, count, page, scan_error);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(35));
-    }
-}
-
-static char keyboard_key_at(uint16_t x, uint16_t y, bool lower_case, bool symbols)
-{
-    const char *const *rows = symbols ? keyboard_symbols : (lower_case ? keyboard_lower : keyboard_upper);
-    for (int row = 0; row < 3; ++row) {
-        if (y < keyboard_row_y[row] || y >= keyboard_row_y[row] + 58) {
-            continue;
-        }
-        const char *keys = rows[row];
-        const size_t count = strlen(keys);
-        const int start_x = (LCD_H_RES - ((int)count * 98 - 10)) / 2;
-        if (x >= start_x) {
-            const size_t index = (x - start_x) / 98;
-            if (index < count && (x - start_x) % 98 < 88) {
-                return keys[index];
-            }
-        }
-    }
-    return '\0';
-}
-
-static bool configure_wifi_locked(char *ssid, size_t ssid_capacity,
-                            char *wifi_password, size_t wifi_password_capacity,
-                            char *web_password, size_t web_password_capacity,
-                            bool *create_network)
-{
-    if (touch == NULL || ssid == NULL || wifi_password == NULL || web_password == NULL ||
-        create_network == NULL || ssid_capacity < 2 ||
-        wifi_password_capacity < 2 || web_password_capacity < 9) {
-        ESP_LOGE(TAG, "Touch setup unavailable or Wi-Fi setup buffer is invalid");
-        return false;
-    }
-
-    wifi_setup_active = true;
-choose_mode:
-    fill_background(rgb565(8, 16, 32));
-    draw_text("CONFIGURAR WIFI", 80, 6, rgb565(240, 245, 255));
-    draw_filled_rect(100, 200, 824, 100, rgb565(30, 54, 72));
-    draw_text("CONECTAR A UNA WIFI", 235, 4, rgb565(240, 245, 255));
-    draw_filled_rect(100, 350, 824, 100, rgb565(30, 54, 72));
-    draw_text("CREAR UNA WIFI", 385, 4, rgb565(240, 245, 255));
-    flush_framebuffer();
-    bool choosing = true;
-    bool mode_touch_down = true;
-    while (choosing) {
-        uint16_t x = 0, y = 0;
-        bool pressed = false;
-        if (read_touch_press(&mode_touch_down, &x, &y, &pressed) != ESP_OK) {
-            wifi_setup_active = false;
-            return false;
-        }
-        if (pressed && x >= 100 && x < 924 &&
-            ((y >= 200 && y < 300) || (y >= 350 && y < 450))) {
-            *create_network = y >= 350;
-            choosing = false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(35));
-    }
-    bool network_selected = false;
-    ssid[0] = '\0';
-    wifi_password[0] = '\0';
-    if (*create_network) {
-        strlcpy(ssid, "Esp32AxpertVMII", ssid_capacity);
-        network_selected = true;
-    } else if (!select_wifi_network(ssid, ssid_capacity, &network_selected)) {
-        wifi_setup_active = false;
-        return false;
-    }
-    unsigned int selected_field = network_selected ? 1 : 0;
-    bool lower_case = true;
-    bool symbols = false;
-    bool touch_was_down = true;
-    char *target[] = {ssid, wifi_password, web_password};
-    const size_t capacities[] = {ssid_capacity, wifi_password_capacity, web_password_capacity};
-    draw_wifi_setup(ssid, wifi_password, web_password, selected_field, lower_case, symbols, *create_network);
-
-    while (true) {
-        uint16_t x = 0;
-        uint16_t y = 0;
-        bool pressed = false;
-        if (read_touch_press(&touch_was_down, &x, &y, &pressed) != ESP_OK) {
-            wifi_setup_active = false;
-            return false;
-        }
-        if (!pressed) {
-            vTaskDelay(pdMS_TO_TICKS(35));
-            continue;
-        }
-
-        bool redraw = true;
-        const char key = keyboard_key_at(x, y, lower_case, symbols);
-        if (x >= 770 && x < 1000 && y >= 10 && y < 60) {
-            goto choose_mode;
-        } else if (x >= 22 && x < 1002 && y >= 75 && y < 249 && (y - 75) % 58 < 48) {
-            selected_field = (unsigned int)((y - 75) / 58);
-        } else if (key != '\0') {
-            const size_t length = strlen(target[selected_field]);
-            if (length + 1 < capacities[selected_field]) {
-                target[selected_field][length] = key;
-                target[selected_field][length + 1] = '\0';
-            } else {
-                ESP_LOGW(TAG, "Wi-Fi setup field %u is full", selected_field);
-            }
-        } else if (y >= 500 && y < 565) {
-            if (x >= 55 && x < 225) {
-                symbols = !symbols;
-            } else if (x >= 245 && x < 425) {
-                lower_case = !lower_case;
-                symbols = false;
-            } else if (x >= 445 && x < 625) {
-                const size_t length = strlen(target[selected_field]);
-                if (length + 1 < capacities[selected_field]) {
-                    target[selected_field][length] = ' ';
-                    target[selected_field][length + 1] = '\0';
-                }
-            } else if (x >= 645 && x < 795) {
-                char *value = target[selected_field];
-                const size_t length = strlen(value);
-                if (length > 0) {
-                    value[length - 1] = '\0';
-                }
-            } else if (x >= 815 && x < 970) {
-                if (ssid[0] != '\0' && strlen(web_password) >= 8 &&
-                    network_valid_wifi_password(wifi_password, *create_network)) {
-                    wifi_setup_active = false;
-                    return true;
-                }
-                ESP_LOGW(TAG, "Wi-Fi setup requires SSID, OTA password >=8 and AP password 8..63");
-                memcpy(framebuffer, lcd_framebuffers[drawing_buffer_index ^ 1u],
-                       LCD_H_RES * LCD_V_RES * sizeof(*framebuffer));
-                draw_text_at("CLAVE WEB MIN 8 / WIFI 8 A 63 O ABIERTA", 30, 580, 2, rgb565(255, 160, 120));
-                flush_framebuffer();
-                redraw = false;
-            }
-        } else {
-            redraw = false;
-        }
-
-        if (redraw) {
-            draw_wifi_setup(ssid, wifi_password, web_password, selected_field, lower_case, symbols, *create_network);
-        }
-        vTaskDelay(pdMS_TO_TICKS(35));
-    }
 }
 
 bool display_configure_wifi(char *ssid, size_t ssid_capacity,
                             char *wifi_password, size_t wifi_password_capacity,
                             char *web_password, size_t web_password_capacity,
-                            bool *create_network)
+                            bool *create_network, bool allow_cancel,
+                            const char *mobile_instructions)
 {
+    if (touch == NULL || ssid == NULL || wifi_password == NULL || web_password == NULL ||
+        create_network == NULL || mobile_instructions == NULL ||
+        ssid_capacity < 33 || wifi_password_capacity < 65 || web_password_capacity < 49) {
+        ESP_LOGE(TAG, "Invalid LVGL Wi-Fi configuration buffers or missing touch controller");
+        return false;
+    }
+    dashboard_wifi_config_t config = {.create_network = *create_network};
+    strlcpy(config.ssid, ssid, sizeof(config.ssid));
+    strlcpy(config.wifi_password, wifi_password, sizeof(config.wifi_password));
+    strlcpy(config.web_password, web_password, sizeof(config.web_password));
     xSemaphoreTake(render_mutex, portMAX_DELAY);
-    const bool configured = configure_wifi_locked(ssid, ssid_capacity, wifi_password,
-                                                  wifi_password_capacity, web_password,
-                                                  web_password_capacity, create_network);
+    dashboard_lvgl_resume(framebuffer, lcd_framebuffers[drawing_buffer_index ^ 1u]);
+    dashboard_lvgl_wifi_begin(&config, allow_cancel, mobile_instructions);
+    bool saved = false, was_down = false;
+    int64_t last_tick = esp_timer_get_time() / 1000;
+    while (!dashboard_lvgl_wifi_finished(&saved)) {
+        uint16_t x = 0, y = 0;
+        bool pressed = false;
+        if (read_touch_press(&was_down, &x, &y, &pressed) != ESP_OK) {
+            saved = false;
+            break;
+        }
+        dashboard_lvgl_touch(was_down, x, y);
+        const int64_t now = esp_timer_get_time() / 1000;
+        dashboard_lvgl_process((uint32_t)(now - last_tick));
+        last_tick = now;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    dashboard_lvgl_wifi_end();
     xSemaphoreGive(render_mutex);
-    return configured;
+    if (saved) {
+        strlcpy(ssid, config.ssid, ssid_capacity);
+        strlcpy(wifi_password, config.wifi_password, wifi_password_capacity);
+        strlcpy(web_password, config.web_password, web_password_capacity);
+        *create_network = config.create_network;
+    }
+    return saved;
 }
