@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Panel energético · ESP32 Axpert</title>
+<link rel="icon" href="data:,"><link rel="stylesheet" href="/panel.css">
+<script defer src="/panel.js"></script>
+</head>
+<body>
+<header>
+  <div><h1>Panel energético</h1><p id="status" role="status">Conectando con el ESP32...</p></div>
+  <div class="actions"><time id="clock">Sin reloj</time><button id="fullscreen">Pantalla completa</button><button id="maintenance">Datos y OTA</button></div>
+</header>
+<main aria-label="Datos del Axpert por USB">
+<svg id="flows" aria-hidden="true"><path id="solar-flow" class="flow solar"/><path id="grid-flow" class="flow ac"/><path id="house-flow" class="flow ac"/><path id="battery-flow" class="flow battery"/></svg>
+<div id="nodes">
+  <button class="node solar" data-card="solar"><span class="icon" aria-hidden="true">☀</span><span>Entrada solar FV · Axpert</span><strong id="solar-power">Sin datos</strong><small id="solar-detail">Entrada solar</small></button>
+  <button class="node ac" data-card="grid"><span class="icon" aria-hidden="true">↯</span><span>Entrada de red AC · Axpert</span><strong id="grid-voltage">Sin datos</strong><small id="grid-detail">Potencia de entrada no disponible</small></button>
+  <button class="node inverter" data-card="inverter"><div class="inverter-shell"><span id="model">Axpert VMIII</span><strong id="mode">Sin datos</strong><small id="temperature">Sin datos</small><div class="lcd"><span id="inverter-output">USB HID</span></div><div class="vents"></div></div></button>
+  <button class="node host" data-card="esp32"><span class="icon" aria-hidden="true">▣</span><span>ESP32</span><strong id="usb">Conectando</strong><small id="host-detail">Wi-Fi y USB</small></button>
+  <button class="node ac" data-card="house"><span class="icon" aria-hidden="true">⌂</span><span>Salida AC · Casa</span><strong id="output-power">Sin datos</strong><small id="output-detail">Medida del inversor</small></button>
+  <button class="node battery" data-card="battery"><span class="icon" aria-hidden="true">▰</span><span>Batería · datos Axpert</span><strong id="battery-soc">Sin datos</strong><small id="battery-detail">Sin datos</small><small id="battery-source">SOC informado por el inversor</small></button>
+</div>
+</main>
+<footer><span id="energy">Energía acumulada: sin datos</span><span id="notice" role="status">Solo lectura · Toca una tarjeta para ver sus datos</span></footer>
+<dialog id="detail"><div class="dialog-heading"><h2 id="detail-title">Datos</h2><button id="close-detail">Cerrar</button></div><dl id="detail-values"></dl><p id="detail-note"></p></dialog>
+<dialog id="tools"><div class="dialog-heading"><h2>Datos y mantenimiento</h2><button id="close-tools">Cerrar</button></div>
+<p>Solo datos del Axpert por USB. <a href="/api/axpert" target="_blank" rel="noopener">Abrir JSON completo</a> · <a href="/api/screen.bmp" target="_blank" rel="noopener">Ver captura de la LCD</a></p>
+<details><summary>Respuestas y diagnóstico USB</summary><button id="refresh-raw">Actualizar datos</button><pre id="raw">Pulsa actualizar para consultar.</pre></details>
+<h3>Actualizar firmware por OTA</h3><p>Selecciona firmware.bin. La pantalla se reiniciará; no se cambian ajustes del inversor.</p>
+<input id="firmware" type="file" accept=".bin,application/octet-stream"><button id="upload">Actualizar firmware</button><p id="ota-status" role="status"></p>
+<p class="muted">Acceso solo desde una red de confianza. HTTP no cifra el tráfico.</p>
+</dialog>
+</body>
+</html>

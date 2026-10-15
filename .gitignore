@@ -1,0 +1,13 @@
+.pio/
+managed_components/
+sdkconfig
+sdkconfig.old
+sdkconfig.waveshare-esp32-s3-touch-lcd-7b
+.vscode/
+docs/*.doc
+docs/*.pdf
+docs/nuevo.txt
+ESP32-S3-Touch-LCD-7B-master/
+*.log
+.env
+.env.*
